@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - **Browser proxy.** `KWNT_BROWSER_PROXY=socks5://host:port` (or `http://`) sends the bots' browser out through a proxy, so sites see a home connection instead of a datacenter one. It applies to the compose browser, the browser container kwant starts itself and local Chrome; kwant's own services and private ranges always skip it. `kwnt doctor` checks that the proxy answers and that its exit address differs from the direct one. Credentials in the value are refused. See `docs/browser-proxy.md`.
+- **Built-in WireGuard for the browser.** Paste a WireGuard config (a router's "single device" connection) with `kwnt wireguard import` or `PUT /api/settings/wireguard`, turn on the `wireguard` compose profile, and a `wireproxy` helper (user space, no root, no host relay or iptables) carries the browser's traffic out through it. The private key lives in its own `0600` volume and is never printed, logged or returned. Use a separate router connection for kwant: one connection works from one place at a time. `kwnt doctor` reports it. See `docs/wireguard-helper.md`.
 
 ## [Mac 0.9.15] - 2026-11-15
 
