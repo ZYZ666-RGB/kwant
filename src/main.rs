@@ -250,7 +250,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Debug)]
 enum WireguardAction {
     /// Save a WireGuard config (from a file, or from stdin when no file is given)
     Import { file: Option<std::path::PathBuf> },
