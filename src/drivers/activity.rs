@@ -1736,7 +1736,8 @@ mod tests {
         log.refused("mcp__github__create_or_update_file", crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
         log.observe(&pending("x", "Bash", json!({"command": "ls"})));
         let ended = log.observe(&RuntimeEvent::ToolCallCompleted { id: "x".into(), result: json!({"status": "ok"}) });
-        assert_eq!((ended[0].status, ended[0].detail.as_deref()), ("ok", None));
+        // An ok step keeps its command summary as detail, as on main; the note doesn't touch it
+        assert_eq!((ended[0].status, ended[0].detail.as_deref()), ("ok", Some("ls")));
         log.observe(&pending("y", "mcp__github__create_or_update_file", json!({"branch": "lin-x"})));
         let ended = log.observe(&RuntimeEvent::ToolCallCompleted { id: "y".into(), result: json!({"status": "denied", "error": gate}) });
         assert_eq!(ended[0].detail.as_deref(), Some(crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL));
