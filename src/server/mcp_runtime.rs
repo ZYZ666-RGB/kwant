@@ -1519,6 +1519,12 @@ pub async fn gateway_grok_endpoint(
     gateway_rpc(&state, &headers, msg, GatewayNaming::Grok).await
 }
 
+/// The engine's own id for a gateway `tools/call` (28q): Claude Code sends its tool-use id, which
+/// its activity step carries, as `_meta["claudecode/toolUseId"]`. `None` when the engine sends none.
+fn engine_call_id(msg: &Value) -> Option<&str> {
+    msg["params"]["_meta"]["claudecode/toolUseId"].as_str().map(str::trim).filter(|id| !id.is_empty())
+}
+
 async fn gateway_rpc(
     state: &AppState,
     headers: &HeaderMap,
@@ -1555,6 +1561,7 @@ async fn gateway_rpc(
             };
             let arguments = msg["params"].get("arguments").cloned().unwrap_or_else(|| json!({}));
             let call_id = format!("gw_{}", uuid::Uuid::new_v4().simple());
+            let step_id = engine_call_id(&msg);
             let Some(tools) = session.tool_session().await else {
                 return StatusCode::UNAUTHORIZED.into_response();
             };
@@ -1565,7 +1572,7 @@ async fn gateway_rpc(
             // Dropping the call withdraws its card (or stops the forwarded call) when the turn ends
             let (caller, raw_arguments) = (session.caller(), arguments.to_string());
             let outcome = tokio::select! {
-                outcome = tools.call(&caller, &call_id, &tool_name, &raw_arguments) => outcome,
+                outcome = tools.call_step(&caller, &call_id, step_id, &tool_name, &raw_arguments) => outcome,
                 _ = session.ended.cancelled() => {
                     let (server, tool) = mcp::split_tool_name(&tool_name).unwrap_or(("", name));
                     session.ctx.record(cancelled_record(&call_id, &tool_name, server, tool, &arguments));
@@ -1665,5 +1672,22 @@ mod card_settles_tests {
         // What the bot hears doesn't change: a withdrawn card and a Deny are both `Denied`
         assert_eq!(ApprovalOutcome::Denied.refusal_text(), mcp::DENIED_TEXT);
         assert_eq!(ApprovalOutcome::Denied.record_status(), "denied");
+    }
+}
+
+#[cfg(test)]
+mod engine_call_id_tests {
+    use super::*;
+
+    /// 28q: the gateway keys a held push's step note to Claude Code's tool-use id, which it sends
+    /// on `tools/call` as `_meta["claudecode/toolUseId"]`; an engine that sends none gives `None`.
+    #[test]
+    fn the_gateway_reads_the_engines_own_call_id() {
+        let call = |meta: Value| json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "github__push", "arguments": {}, "_meta": meta}});
+        assert_eq!(engine_call_id(&call(json!({"claudecode/toolUseId": "toolu_01AbC"}))), Some("toolu_01AbC"));
+        assert_eq!(engine_call_id(&call(json!({"progressToken": 1}))), None);
+        assert_eq!(engine_call_id(&call(json!({"claudecode/toolUseId": " "}))), None);
+        assert_eq!(engine_call_id(&call(json!({"claudecode/toolUseId": 7}))), None);
+        assert_eq!(engine_call_id(&json!({"method": "tools/call", "params": {"name": "github__push"}})), None);
     }
 }

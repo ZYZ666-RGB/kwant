@@ -92,10 +92,24 @@ pub struct ActivityLog {
     /// so one Deny ends one tool step `declined`, and of `stopped` ones paired with the denied
     /// step whose wait they ended (28k).
     paired: HashSet<usize>,
-    /// Calls kwnt refused on its own this turn, before the engine heard (28k), oldest first: the
-    /// tool's name and the words its step shows instead of what the bot was told. Each one is
-    /// used by one failed step of that tool.
-    refused: Vec<(String, &'static str)>,
+    /// Calls kwnt refused on its own this turn, before the engine heard (28k), oldest first. Each
+    /// one is used by one failed step: its own call's (28q), see [`ActivityLog::refusal_for`].
+    refused: Vec<Refusal>,
+    /// The arguments of each open tool step (index in `steps`), as the engine sent them, so a
+    /// refusal noted without the engine's id finds its own call (28q).
+    open_args: HashMap<usize, Value>,
+}
+
+/// A call kwnt refused on its own (28k), and which call that was (28q).
+#[derive(Debug)]
+struct Refusal {
+    tool: String,
+    /// The engine's id for the call, which its tool step carries, when kwnt was told it.
+    call: Option<String>,
+    /// The call's arguments, when kwnt knows them.
+    args: Option<Value>,
+    /// What the step shows instead of the text the bot was told.
+    words: &'static str,
 }
 
 fn now() -> String {
@@ -204,12 +218,14 @@ impl ActivityLog {
                     self.steps[i].tool = Some(name.clone());
                     self.steps[i].detail = detail.map(|d| cut(&self.redact(&d), MAX_DETAIL));
                     self.tools.insert(id.clone(), i);
+                    self.open_args.insert(i, args.clone());
                     changed.push(self.steps[i].clone());
                 }
             }
             RuntimeEvent::ToolCallCompleted { id, result } => {
                 changed.extend(self.close_thinking());
                 if let Some(i) = self.tools.remove(id) {
+                    let args = self.open_args.remove(&i);
                     let (status, why) = step_end(result);
                     let card = self.declined_card_for(i, status, why.as_deref());
                     if let Some(why) = why.as_deref() {
@@ -229,7 +245,7 @@ impl ActivityLog {
                             "declined"
                         }
                         None => {
-                            if let Some(words) = self.blocked_detail(i, status, why.as_deref()) {
+                            if let Some(words) = self.blocked_detail(i, id, args.as_ref(), status, why.as_deref()) {
                                 self.steps[i].detail = Some(words.to_string());
                             }
                             status
@@ -264,29 +280,67 @@ impl ActivityLog {
         })
     }
 
-    /// kwnt refused a call to `tool` on its own, before the engine heard (28k): the next failed
-    /// step of that tool shows `words`, not the text the bot was told.
+    /// kwnt refused a call to `tool` on its own, before the engine heard (28k), and doesn't know
+    /// which call: a failed step of that tool shows `words`, not the text the bot was told, once
+    /// it is the only step of that tool still open (28q).
     pub fn refused(&mut self, tool: &str, words: &'static str) {
-        self.refused.push((tool.to_string(), words));
+        self.refused_call(tool, None, None, words);
+    }
+
+    /// kwnt refused one call to `tool` on its own, before the engine heard (28k): the failed step
+    /// of that call shows `words`, not the text the bot was told. `call` is the engine's id for it
+    /// (its step's id) and `args` its arguments, when kwnt knows them, so a neighbouring call of
+    /// the same tool that fails for its own reason keeps that reason (28q).
+    pub fn refused_call(&mut self, tool: &str, call: Option<&str>, args: Option<&Value>, words: &'static str) {
+        self.refused.push(Refusal {
+            tool: tool.to_string(),
+            call: call.filter(|c| !c.is_empty()).map(str::to_string),
+            args: args.cloned(),
+            words,
+        });
+    }
+
+    /// The refusal that belongs to the tool step with engine id `id`, of tool `tool` and with
+    /// arguments `args`, which just ended (28q), oldest first:
+    /// - one noted with that same id;
+    /// - else one of that tool with the same arguments;
+    /// - else, only when no other step of that tool is still open, one of that tool.
+    ///
+    /// A refusal whose id names another step still open waits for that step.
+    fn refusal_for(&self, id: &str, tool: Option<&str>, args: Option<&Value>) -> Option<usize> {
+        if let Some(k) = self.refused.iter().position(|r| r.call.as_deref() == Some(id)) {
+            return Some(k);
+        }
+        let tool = tool?;
+        let free = |r: &Refusal| r.tool == tool && r.call.as_ref().is_none_or(|c| !self.tools.contains_key(c));
+        if let Some(k) = self.refused.iter().position(|r| free(r) && r.args.is_some() && r.args.as_ref() == args) {
+            return Some(k);
+        }
+        let alone = !self.tools.values().any(|&j| self.steps[j].tool.as_deref() == Some(tool));
+        if alone {
+            self.refused.iter().position(free)
+        } else {
+            None
+        }
     }
 
     /// What tool step `i`, which [`step_end`] ended `status` with reason `why` and no declined card
     /// of its own, shows instead of the bot's text (28k). Nobody pressed Deny, so it never says the
     /// person did:
-    /// - the words of a refusal kwnt noted for its tool ([`refused`](Self::refused)), such as the
-    ///   pre-push gate's;
+    /// - the words of a refusal kwnt noted for its own call ([`refused_call`](Self::refused_call),
+    ///   matched by [`refusal_for`](Self::refusal_for)), such as the pre-push gate's;
     /// - when it failed with [`crate::mcp::DENIED_TEXT`] and the turn has a `stopped` approval
     ///   step of the same tool not yet paired (its card stopped waiting with no answer),
     ///   [`crate::mcp::NOBODY_ANSWERED_STEP_DETAIL`], and that card is paired with it;
     /// - else, with [`crate::mcp::DENIED_TEXT`], [`crate::mcp::BLOCKED_STEP_DETAIL`] (kwnt's
     ///   secret files, a ticket it couldn't store).
-    fn blocked_detail(&mut self, i: usize, status: &str, why: Option<&str>) -> Option<&'static str> {
+    fn blocked_detail(&mut self, i: usize, id: &str, args: Option<&Value>, status: &str, why: Option<&str>) -> Option<&'static str> {
         if status != "failed" {
             return None;
         }
         let tool = self.steps[i].tool.clone();
-        if let Some(k) = self.refused.iter().position(|(t, _)| Some(t) == tool.as_ref()) {
-            return Some(self.refused.remove(k).1);
+        if let Some(k) = self.refusal_for(id, tool.as_deref(), args) {
+            return Some(self.refused.remove(k).words);
         }
         if !why.is_some_and(|w| w.starts_with(crate::mcp::DENIED_TEXT)) {
             return None;
@@ -339,6 +393,7 @@ impl ActivityLog {
     pub fn finish(&mut self) -> Vec<Step> {
         let mut changed: Vec<Step> = self.close_thinking().into_iter().collect();
         self.tools.clear();
+        self.open_args.clear();
         for i in 0..self.steps.len() {
             if self.steps[i].is_open() {
                 changed.push(self.end(i, "stopped"));
@@ -1741,6 +1796,100 @@ mod tests {
         log.observe(&pending("y", "mcp__github__create_or_update_file", json!({"branch": "lin-x"})));
         let ended = log.observe(&RuntimeEvent::ToolCallCompleted { id: "y".into(), result: json!({"status": "denied", "error": gate}) });
         assert_eq!(ended[0].detail.as_deref(), Some(crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL));
+    }
+
+    /// 28q (Rigel's 28k QA note 1): two overlapping calls of one tool in one turn, one failing
+    /// for its own reason and one the pre-push gate held. The held one shows "Blocked before push;
+    /// nothing ran" and the other keeps its own reason, whichever ends first and whether or not the
+    /// gate's note arrives before the other one fails; keyed by the engine's id when kwnt was told
+    /// it (Claude Code's tool-use id, the API driver's call id), else by the call's arguments.
+    #[test]
+    fn a_held_push_keeps_its_words_next_to_a_call_that_failed_on_its_own() {
+        const TOOL: &str = "mcp__github__create_or_update_file";
+        let gate = "kwant is checking this push of main before it goes (pre-push card pp1). Nothing was pushed.";
+        let own = "409 Conflict: README.md changed on the branch";
+        let other_args = json!({"owner": "o", "repo": "r", "branch": "lin-x", "path": "README.md"});
+        let held_args = json!({"owner": "o", "repo": "r", "branch": "main", "path": "src/lib.rs"});
+        let failed = |id: &str, error: &str| RuntimeEvent::ToolCallCompleted {
+            id: id.into(),
+            result: json!({"status": "error", "error": error}),
+        };
+        let words_of = |log: &mut ActivityLog, ev: RuntimeEvent| {
+            let ended = log.observe(&ev);
+            (ended[0].status, ended[0].detail.clone().unwrap_or_default())
+        };
+        let own_reason = ("failed", own.to_string());
+        let blocked = ("failed", crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL.to_string());
+
+        // How kwnt knows the held call: the engine's id, the arguments only (an engine that sends
+        // no id), or an id from another namespace that no step carries (arguments still match)
+        type Note = fn(&mut ActivityLog, &Value);
+        let notes: [(&str, Note); 3] = [
+            ("engine id", |log, args| log.refused_call(TOOL, Some("held"), Some(args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL)),
+            ("arguments", |log, args| log.refused_call(TOOL, None, Some(args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL)),
+            ("foreign id", |log, args| log.refused_call(TOOL, Some("gw_1"), Some(args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL)),
+        ];
+        for (how, note) in notes {
+            let open = || {
+                let mut log = ActivityLog::default();
+                log.observe(&pending("other", TOOL, other_args.clone()));
+                log.observe(&pending("held", TOOL, held_args.clone()));
+                log
+            };
+            // The gate's note, then the other call fails on its own, then the held one ends
+            let mut log = open();
+            note(&mut log, &held_args);
+            assert_eq!(words_of(&mut log, failed("other", own)), own_reason, "{how}: note first, other ends first");
+            assert_eq!(words_of(&mut log, failed("held", gate)), blocked, "{how}: note first, other ends first");
+            // The held one ends first, then the other
+            let mut log = open();
+            note(&mut log, &held_args);
+            assert_eq!(words_of(&mut log, failed("held", gate)), blocked, "{how}: held ends first");
+            assert_eq!(words_of(&mut log, failed("other", own)), own_reason, "{how}: held ends first");
+            // The other call fails before the gate's note arrives
+            let mut log = open();
+            assert_eq!(words_of(&mut log, failed("other", own)), own_reason, "{how}: other fails before the note");
+            note(&mut log, &held_args);
+            assert_eq!(words_of(&mut log, failed("held", gate)), blocked, "{how}: other fails before the note");
+            // A gate denial reaches the engine as "denied" too
+            let mut log = open();
+            note(&mut log, &held_args);
+            assert_eq!(words_of(&mut log, failed("other", own)), own_reason, "{how}: denied status");
+            let denied_held = RuntimeEvent::ToolCallCompleted { id: "held".into(), result: json!({"status": "denied", "error": gate}) };
+            assert_eq!(words_of(&mut log, denied_held), blocked, "{how}: denied status");
+        }
+
+        // Shown arguments that don't match (the Claude CLI cuts long ones) and no id: by name only
+        // once it is the one step of that tool still open, never a guess between two
+        let mut log = ActivityLog::default();
+        log.observe(&pending("other", TOOL, other_args.clone()));
+        log.observe(&pending("held", TOOL, json!("{\"content\": \"…")));
+        log.refused_call(TOOL, None, Some(&held_args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+        assert_eq!(words_of(&mut log, failed("other", own)), own_reason, "two open: no guess");
+        assert_eq!(words_of(&mut log, failed("held", gate)), blocked, "the one left open");
+
+        // A note keyed to a call still open waits for it, even when its arguments repeat another
+        let mut log = ActivityLog::default();
+        log.observe(&pending("other", TOOL, held_args.clone()));
+        log.observe(&pending("held", TOOL, held_args.clone()));
+        log.refused_call(TOOL, Some("held"), Some(&held_args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+        assert_eq!(words_of(&mut log, failed("other", own)), own_reason, "same arguments, other id");
+        assert_eq!(words_of(&mut log, failed("held", gate)), blocked, "same arguments, own id");
+
+        // Each held call of two keeps its own note; the bot's text is never touched
+        let mut log = ActivityLog::default();
+        log.observe(&pending("a", TOOL, other_args.clone()));
+        log.observe(&pending("b", TOOL, held_args.clone()));
+        log.refused_call(TOOL, Some("b"), Some(&held_args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+        log.refused_call(TOOL, Some("a"), Some(&other_args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+        let held_b = failed("b", gate);
+        assert_eq!(words_of(&mut log, held_b.clone()), blocked);
+        assert_eq!(words_of(&mut log, failed("a", gate)), blocked);
+        let RuntimeEvent::ToolCallCompleted { result, .. } = &held_b else { unreachable!() };
+        assert_eq!(result["error"], gate);
+        // Both notes are used up: a later failure keeps its own reason
+        log.observe(&pending("c", TOOL, held_args.clone()));
+        assert_eq!(words_of(&mut log, failed("c", own)), own_reason);
     }
 
     /// 28k: a denial whose card stopped waiting with no answer (it couldn't stay open, or it was
