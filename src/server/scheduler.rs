@@ -721,7 +721,7 @@ pub fn steps_seen(
         let reason = text(&c["error"]).or_else(|| text(&c["result"]));
         // A refusal's reason is what kwnt told the bot, not news; say what it was instead
         let reason = match c["status"].as_str() {
-            Some("denied") => Some(format!("{tool} was denied")),
+            Some("denied") => Some(said_no(&tool)),
             _ => reason.map(|r| {
                 r.replace(crate::mcp::NO_FALSE_CLAIMS_TEXT, "")
                     .trim()
@@ -743,15 +743,27 @@ pub fn steps_seen(
             (_, Some("unanswered")) => "unanswered",
             (Some("tool"), Some("ok")) => "ok",
             (Some("tool"), Some("failed")) => "failed",
+            // The person said no on its card (28b): it didn't run, so the run isn't ok
+            (Some("tool"), Some("declined")) => "failed",
             _ => continue,
         };
+        let tool = text(&step["tool"]).unwrap_or_default();
+        let reason = match step["status"].as_str() {
+            Some("declined") => Some(said_no(&tool)),
+            _ => text(&step["detail"]),
+        };
         seen.push(StepSeen {
-            tool: text(&step["tool"]).unwrap_or_default(),
+            tool,
             status,
-            reason: text(&step["detail"]),
+            reason,
         });
     }
     seen
+}
+
+/// A routine run's reason when the person said no to `tool` (28b).
+fn said_no(tool: &str) -> String {
+    format!("You said no to {tool}; nothing ran")
 }
 
 /// The meta key of a routine run's id on each reply of its turn (see `run_routine_turn`).
@@ -1241,7 +1253,7 @@ mod run_outcome_tests {
             vec![
                 step("ha__turn_on", "unanswered", None),
                 step("web__get", "failed", Some("502")),
-                step("mail__send", "failed", Some("mail__send was denied")),
+                step("mail__send", "failed", Some("You said no to mail__send; nothing ran")),
                 step("Bash", "unanswered", None),
                 step("Bash", "failed", Some("exit 1")),
                 step("Bash", "ok", None),
@@ -1295,5 +1307,27 @@ mod run_outcome_tests {
                 ..
             }
         ));
+    }
+
+    /// 28b: a routine whose only step the person said no to on its card isn't ok: it stays
+    /// `incomplete`, and its reason says so in the person's words. A Deny on a kwnt tool reads
+    /// the same.
+    #[test]
+    fn a_no_ends_the_run_incomplete_in_the_persons_words() {
+        let meta = json!({"activity": {"steps": [
+            {"kind": "tool", "status": "declined", "tool": "Bash", "detail": crate::mcp::DENIED_STEP_DETAIL},
+            {"kind": "approval", "status": "declined", "tool": "Bash"},
+        ]}});
+        let seen = steps_seen(None, Some(&meta));
+        assert_eq!(seen, vec![step("Bash", "failed", Some("You said no to Bash; nothing ran"))]);
+        assert_eq!(
+            run_outcome(&seen),
+            ("incomplete", Some("You said no to Bash; nothing ran".into()))
+        );
+        let calls = json!([{"name": "mail__send", "status": "denied", "result": crate::mcp::DENIED_TEXT}]);
+        assert_eq!(
+            run_outcome(&steps_seen(Some(&calls), None)),
+            ("incomplete", Some("You said no to mail__send; nothing ran".into()))
+        );
     }
 }

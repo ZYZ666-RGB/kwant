@@ -707,12 +707,15 @@ fn strip_leads(mut s: &str) -> &str {
 
 /// The turn's tool steps, from its saved activity (`{"steps": [...]}`): whether it ran any, its
 /// last one when that one failed (a refused tool call is a failed step too), and whether the
-/// person declined an approval card in it.
+/// person declined an approval card in it, or said no to a tool step (28b: a `declined` tool step,
+/// with or without a card).
 pub fn tool_steps_in(activity: Option<&Value>) -> (bool, Option<FailedStep>, bool) {
     let Some(steps) = activity.and_then(|a| a["steps"].as_array()) else {
         return (false, None, false);
     };
-    let declined = steps.iter().any(|s| s["kind"] == "approval" && s["status"] == "declined");
+    let declined = steps
+        .iter()
+        .any(|s| matches!(s["kind"].as_str(), Some("approval" | "tool")) && s["status"] == "declined");
     let last = steps.iter().rfind(|s| s["kind"] == "tool" && !matches!(s["status"].as_str(), Some("running" | "waiting")));
     let failed = last.filter(|s| s["status"] == "failed").map(|s| FailedStep {
         tool: s["tool"].as_str().unwrap_or("a tool").to_string(),
@@ -1714,5 +1717,17 @@ mod tests {
         // ...and a link that didn't open carries over the same way, unless a tool ran after it
         assert_eq!(FailedBefore::of_turn(None, page), page);
         assert_eq!(FailedBefore::of_turn(reads.as_ref(), page), none);
+    }
+
+    /// 28b: a tool step the person said no to counts as declined, with or without a card (#781's
+    /// no-card refusal has none), and isn't a failed step to follow through.
+    #[test]
+    fn a_declined_tool_step_counts_as_declined() {
+        let activity = json!({"steps": [
+            {"kind": "tool", "tool": "Bash", "title": "Running `rm -rf build`", "status": "declined", "detail": "You said no; nothing ran"},
+        ]});
+        let (_, failed, declined) = tool_steps_in(Some(&activity));
+        assert!(declined);
+        assert_eq!(failed, None);
     }
 }
