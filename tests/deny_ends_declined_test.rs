@@ -41,16 +41,17 @@ async fn a_deny_on_the_card_ends_the_step_declined_and_the_run_incomplete() {
     assert_eq!(s.as_u16(), 202, "{run}");
     let run_id = run["id"].as_str().unwrap().to_string();
 
-    // The person presses Deny on the card
-    let waiting = || async {
+    // The person presses Deny on the card while it's open (`pending`; `waiting` is only a card
+    // whose wait ran out)
+    let open = || async {
         env.state
             .db
-            .list_approvals(&SpaceId::default_space(), Some("waiting"), Some(&env.a))
+            .list_approvals(&SpaceId::default_space(), Some("pending"), Some(&env.a))
             .await
             .unwrap()
     };
-    wait_for("the card", || async { !waiting().await.is_empty() }).await;
-    let ticket = waiting().await[0].id.clone();
+    wait_for("the card", || async { !open().await.is_empty() }).await;
+    let ticket = open().await[0].id.clone();
     let (s, v) = call(
         &env.app,
         "POST",
