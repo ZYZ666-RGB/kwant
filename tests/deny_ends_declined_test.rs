@@ -118,4 +118,45 @@ async fn a_deny_on_the_card_ends_the_step_declined_and_the_run_incomplete() {
         (&json!("incomplete"), &json!("You said no to Bash; nothing ran")),
         "{run}"
     );
+    // The routine list carries it, so its card can tell a no from a failure (28b round 2)
+    let (_, list) = call(&env.app, "GET", "/api/routines", None).await;
+    let listed = list.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).cloned().unwrap_or(Value::Null);
+    assert_eq!(
+        (&listed["last_status"], &listed["last_error"]),
+        (&json!("incomplete"), &json!("You said no to Bash; nothing ran")),
+        "{listed}"
+    );
+}
+
+/// 28b round 2: a routine lists its last run's error next to its status: the error of an
+/// `incomplete` run, `null` once a later run is `ok`, and `null` before any run.
+#[tokio::test]
+async fn the_routine_list_carries_the_last_runs_error() {
+    let env = setup().await;
+    let (s, r) = call(
+        &env.app,
+        "POST",
+        "/api/routines",
+        Some(json!({"kwant_id": env.a, "name": "Digest", "instructions": "Send the digest",
+            "schedule": {"type": "daily", "time": "03:00", "tz": "UTC"}})),
+    )
+    .await;
+    assert_eq!(s.as_u16(), 201, "{r}");
+    assert_eq!(r["last_error"], Value::Null, "{r}");
+    let id = r["id"].as_str().unwrap().to_string();
+    let listed = || async {
+        let (_, list) = call(&env.app, "GET", "/api/routines", None).await;
+        let row = list.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).cloned().unwrap_or(Value::Null);
+        (row["last_status"].clone(), row["last_error"].clone())
+    };
+    assert_eq!(listed().await, (Value::Null, Value::Null));
+
+    let db = &env.state.db;
+    db.start_routine_run(&id, "manual", "incomplete", Some("HTTP 500")).await.unwrap();
+    assert_eq!(listed().await, (json!("incomplete"), json!("HTTP 500")));
+    let (_, one) = call(&env.app, "GET", &format!("/api/routines/{id}"), None).await;
+    assert_eq!(one["last_error"], "HTTP 500", "{one}");
+
+    db.start_routine_run(&id, "manual", "ok", None).await.unwrap();
+    assert_eq!(listed().await, (json!("ok"), Value::Null));
 }
