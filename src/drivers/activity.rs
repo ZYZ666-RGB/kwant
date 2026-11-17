@@ -212,8 +212,8 @@ impl ActivityLog {
                 if let Some(i) = self.tools.remove(id) {
                     let (status, why) = step_end(result);
                     let card = self.declined_card_for(i, status, why.as_deref());
-                    if let Some(why) = why {
-                        self.steps[i].detail = Some(cut(&self.redact(&why), MAX_DETAIL));
+                    if let Some(why) = why.as_deref() {
+                        self.steps[i].detail = Some(cut(&self.redact(why), MAX_DETAIL));
                     }
                     if status == "ok" && self.steps[i].tool.as_deref().is_some_and(opens_page) {
                         self.steps[i].page_title = result["title"]
