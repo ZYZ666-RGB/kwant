@@ -1954,11 +1954,37 @@ If what they said points to another way, you may try that; it will ask them agai
     }
 
     /// `a.decide(req)`, answering the card it shows with `answer`: the outcome and the card's
-    /// ticket, `None` when no card went out.
+    /// ticket, `None` when no card went out. Like both real callers (the MCP session and the
+    /// permission prompt) it listens for a Deny's reason ([`mcp::hear_deny_reason`]).
     async fn ask(e: &Env, a: &BrokerApprover, req: ToolApprovalRequest, answer: Answer) -> (ApprovalOutcome, Option<String>) {
+        let (outcome, card, _) = asked(e, a, req, answer, true).await;
+        (outcome, card)
+    }
+
+    /// [`ask`] from a caller that doesn't listen for a Deny's reason: the bot would hear the
+    /// plain `DENIED_TEXT`.
+    async fn ask_unheard(e: &Env, a: &BrokerApprover, req: ToolApprovalRequest, answer: Answer) -> (ApprovalOutcome, Option<String>) {
+        let (outcome, card, _) = asked(e, a, req, answer, false).await;
+        (outcome, card)
+    }
+
+    /// [`ask`], also giving the reason the call heard (`None` when `listening` is false).
+    async fn asked(
+        e: &Env,
+        a: &BrokerApprover,
+        req: ToolApprovalRequest,
+        answer: Answer,
+        listening: bool,
+    ) -> (ApprovalOutcome, Option<String>, Option<String>) {
         let mut events = e.state.event_sender.subscribe();
         let broker = e.state.broker.clone();
-        let decide = a.decide(req);
+        let decide = async move {
+            if listening {
+                mcp::hear_deny_reason(a.decide(req)).await
+            } else {
+                (a.decide(req).await, None)
+            }
+        };
         tokio::pin!(decide);
         let mut card = None;
         let outcome = loop {
@@ -1985,7 +2011,8 @@ If what they said points to another way, you may try that; it will ask them agai
                 panic!("a card went out after the call was settled: {id}");
             }
         }
-        (outcome, card)
+        let (outcome, heard) = outcome;
+        (outcome, card, heard)
     }
 
     /// The bot's approvals rows: (status, details).
@@ -2223,8 +2250,9 @@ If what they said points to another way, you may try that; it will ask them agai
     async fn a_no_with_a_reason_lets_the_adjusted_call_ask() {
         let e = setup().await;
         let a = approver(&e, &e.general, Duration::from_secs(10));
-        let (out, card) = ask(&e, &a, bash(&e.bot, "git push --force origin main"), why("push without --force")).await;
+        let (out, card, heard) = asked(&e, &a, bash(&e.bot, "git push --force origin main"), why("push without --force"), true).await;
         assert_eq!((out, card.is_some()), (ApprovalOutcome::Denied, true));
+        assert_eq!(heard.as_deref(), Some("push without --force"), "the waiting call hears the reason");
         let (out, card) = ask(&e, &a, bash(&e.bot, "git push origin main"), ALLOW).await;
         assert_eq!((out, card.is_some()), (ApprovalOutcome::Allowed, true), "the adjusted call asks, and the person allows it");
         let (out, card) = ask(&e, &a, bash(&e.bot, "git push origin main"), DENY).await;
@@ -2232,6 +2260,19 @@ If what they said points to another way, you may try that; it will ask them agai
         let (out, card) = ask(&e, &a, bash(&e.bot, "git push origin dev"), ALLOW).await;
         assert_eq!((out, card), (ApprovalOutcome::DeclinedBefore, None), "a plain no still stays a no");
         assert_eq!(e.state.broker.deny_reasons_held(), 0);
+    }
+
+    /// 29o round 2: a reason no call listens for reaches nobody (the bot hears the plain
+    /// `DENIED_TEXT`), so the no is remembered as a plain one: the same family isn't asked again.
+    #[tokio::test]
+    async fn a_reason_nobody_hears_stays_a_plain_no() {
+        let e = setup().await;
+        let a = approver(&e, &e.general, Duration::from_secs(10));
+        let (out, card) = ask_unheard(&e, &a, bash(&e.bot, "git push --force origin main"), why("push without --force")).await;
+        assert_eq!((out, card.is_some()), (ApprovalOutcome::Denied, true));
+        let (out, card) = ask(&e, &a, bash(&e.bot, "git push origin main"), ALLOW).await;
+        assert_eq!((out, card), (ApprovalOutcome::DeclinedBefore, None), "an unheard reason is a plain no");
+        assert_eq!(e.state.broker.deny_reasons_held(), 0, "nothing left behind");
     }
 
     /// 29o (d): a late Deny with a reason (its turn stopped waiting) answers as a plain late Deny
