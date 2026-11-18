@@ -461,8 +461,10 @@ mod tests {
         let tag = TurnTag { turn_id: "turn-prepush-held".into(), kwant_id: "k".into(), context_id: "c".into(), thread_id: None };
         let turn = TurnActivity::start(tx, tag);
         turn.observe(&RuntimeEvent::ToolCallPending { id: "1".into(), name: "Bash".into(), args: json!({"command": "git push origin lin-x"}) });
-        refused("turn-prepush-held", "Bash", crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
-        refused("no-such-turn", "Bash", crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+        // 28q: keyed to the held call's own id and arguments
+        let push = json!({"command": "git push origin lin-x"});
+        refused("turn-prepush-held", "Bash", Some("1"), &push, crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+        refused("no-such-turn", "Bash", None, &push, crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
         turn.observe(&RuntimeEvent::ToolCallCompleted {
             id: "1".into(),
             result: json!({"status": "error", "error": "kwant checks one branch at a time before a push: push the branch by name."}),
