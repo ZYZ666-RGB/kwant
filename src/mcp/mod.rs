@@ -480,10 +480,12 @@ pub fn deny_reason(raw: &str) -> Option<String> {
 }
 
 /// 29o: what the bot is told when the person refused a call and said why. Unlike
-/// [`DENIED_TEXT`] it may try another way the person pointed to; that call asks again.
+/// [`DENIED_TEXT`] it may try another way the person pointed to; that call asks again. Its first
+/// sentence is [`DENIED_TEXT`]'s, word for word: the activity log pairs a CLI's denial with the
+/// person's card by that sentence (28b/28q), so the step still ends "You said no; nothing ran".
 pub fn denied_with_reason_text(reason: &str) -> String {
     format!(
-        "The user denied this tool call and said why: \"{reason}\". Don't make this same call again. \
+        "The user denied this tool call. They said why: \"{reason}\". Don't make this same call again. \
 If what they said points to another way, you may try that; it will ask them again. Otherwise say in your reply what you couldn't do."
     )
 }
@@ -834,11 +836,43 @@ mod tests {
         assert_eq!(ApprovalOutcome::Denied.refusal(None), DENIED_TEXT);
         assert_eq!(
             ApprovalOutcome::Denied.refusal(Some("use the staging database")),
-            "The user denied this tool call and said why: \"use the staging database\". Don't make this same call again. \
+            "The user denied this tool call. They said why: \"use the staging database\". Don't make this same call again. \
 If what they said points to another way, you may try that; it will ask them again. Otherwise say in your reply what you couldn't do."
         );
         for other in [ApprovalOutcome::DeclinedBefore, ApprovalOutcome::Unanswered, ApprovalOutcome::Rehearsed] {
             assert_eq!(other.refusal(Some("why")), other.refusal_text(), "{other:?}");
+        }
+    }
+
+    /// 29o round 2: a Deny with a reason, as the claude CLI reports it back (an error carrying the
+    /// permission prompt's message), still ends the tool step `declined` in the person's words,
+    /// paired with its card; the reason and the rest of the bot's text stay out of the step.
+    #[test]
+    fn a_deny_with_a_reason_still_ends_the_step_declined() {
+        use crate::drivers::activity::ActivityLog;
+        use crate::drivers::events::RuntimeEvent;
+        let first = |t: &str| t.split_inclusive('.').next().unwrap_or(t).to_string();
+        let said = ApprovalOutcome::Denied.refusal(Some("push without --force"));
+        assert_eq!(first(&said), first(DENIED_TEXT), "same first sentence as DENIED_TEXT");
+        for text in [with_no_false_claims(&said), said.clone()] {
+            let mut log = ActivityLog::default();
+            log.wait("approval", "t1", "Waiting for your approval: Running `git push --force`", Some("Bash"));
+            log.settle("t1", "declined");
+            log.observe(&RuntimeEvent::ToolCallPending {
+                id: "a".into(),
+                name: "Bash".into(),
+                args: serde_json::json!({"command": "git push --force"}),
+            });
+            let ended = log.observe(&RuntimeEvent::ToolCallCompleted {
+                id: "a".into(),
+                result: serde_json::json!({"status": "error", "error": text}),
+            });
+            assert_eq!(
+                (ended[0].kind, ended[0].status, ended[0].detail.as_deref()),
+                ("tool", "declined", Some(DENIED_STEP_DETAIL))
+            );
+            let shown = serde_json::to_string(log.steps()).unwrap();
+            assert!(!shown.contains("without --force") && !shown.contains("They said why"), "{shown}");
         }
     }
 

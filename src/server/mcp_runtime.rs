@@ -578,11 +578,11 @@ impl BrokerApprover {
             // 29o: a Deny with the person's reason goes back to the call, and its family isn't
             // remembered: they said what to do instead, and the adjusted call gets its own card
             Ok(Ok(ApprovalDecision::Deny)) => {
-                match self.broker.take_deny_reason(&ticket) {
-                    Some(why) => {
-                        mcp::tell_deny_reason(why);
-                    }
-                    None => self.broker.declined.record(&req.kwant_id, &self.conversation, &families, &ticket),
+                // A reason nobody is listening for (no caller scoped by `hear_deny_reason`) means
+                // the bot hears the plain DENIED_TEXT, so the no is remembered as a plain one
+                let heard = self.broker.take_deny_reason(&ticket).is_some_and(mcp::tell_deny_reason);
+                if !heard {
+                    self.broker.declined.record(&req.kwant_id, &self.conversation, &families, &ticket);
                 }
                 ApprovalOutcome::Denied
             }
@@ -1944,7 +1944,7 @@ mod declined_tests {
     /// 29o: what the bot hears when the person said no with `reason` (the brief's words).
     fn said_why(reason: &str) -> String {
         format!(
-            "The user denied this tool call and said why: \"{reason}\". Don't make this same call again. \
+            "The user denied this tool call. They said why: \"{reason}\". Don't make this same call again. \
 If what they said points to another way, you may try that; it will ask them again. Otherwise say in your reply what you couldn't do."
         )
     }
