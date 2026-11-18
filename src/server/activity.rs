@@ -231,11 +231,13 @@ pub fn approval_waiting(turn_id: &str, ticket: &str, tool_name: &str) {
 }
 
 /// kwnt refused a call to `tool_name` in turn `turn_id` on its own, before the engine heard (28k):
-/// that tool's next failed step shows `words` (as [`crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL`]),
-/// not the text the bot was told. Nobody pressed Deny, so it never reads as the person's no.
-pub fn refused(turn_id: &str, tool_name: &str, words: &'static str) {
+/// that call's failed step shows `words` (as [`crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL`]), not the
+/// text the bot was told. Nobody pressed Deny, so it never reads as the person's no. `call` is the
+/// engine's id for the call when kwnt was told it, and `arguments` its arguments, so the words land
+/// on that call's step and not on another call of the same tool (28q).
+pub fn refused(turn_id: &str, tool_name: &str, call: Option<&str>, arguments: &Value, words: &'static str) {
     if let Some(turn) = TurnActivity::find(turn_id) {
-        turn.with_log(|log| log.refused(tool_name, words));
+        turn.with_log(|log| log.refused_call(tool_name, call, Some(arguments), words));
     }
 }
 
@@ -569,8 +571,10 @@ mod tests {
         let tag = TurnTag { turn_id: "turn-prepush-held".into(), kwant_id: "k".into(), context_id: "c".into(), thread_id: None };
         let turn = TurnActivity::start(tx, tag);
         turn.observe(&RuntimeEvent::ToolCallPending { id: "1".into(), name: "Bash".into(), args: json!({"command": "git push origin lin-x"}) });
-        refused("turn-prepush-held", "Bash", crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
-        refused("no-such-turn", "Bash", crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+        // 28q: keyed to the held call's own id and arguments
+        let push = json!({"command": "git push origin lin-x"});
+        refused("turn-prepush-held", "Bash", Some("1"), &push, crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+        refused("no-such-turn", "Bash", None, &push, crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
         turn.observe(&RuntimeEvent::ToolCallCompleted {
             id: "1".into(),
             result: json!({"status": "error", "error": "kwant checks one branch at a time before a push: push the branch by name."}),
