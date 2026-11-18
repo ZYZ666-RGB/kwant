@@ -666,11 +666,12 @@ pub const PAGE_OPEN_TOOLS: [&str; 4] = ["browser_open", "browser_navigate", "nav
 /// gateway name with a `__` left after the prefix stands for another server's tool, so kwnt's own
 /// tools (`mcp__kwnt__browser_open`) only ever match themselves.
 fn same_tool(a: &str, b: &str) -> bool {
-    let routed = |name: &str| {
+    /// The `<server>__<tool>` a gateway name stands for.
+    fn routed(name: &str) -> Option<&str> {
         name.strip_prefix("mcp__kwnt__")
             .or_else(|| name.strip_prefix("mcp__kwant__"))
             .filter(|rest| rest.contains("__"))
-    };
+    }
     let stands_for = |gateway: &str, other: &str| {
         routed(gateway).is_some_and(|rest| other.strip_prefix("mcp__") == Some(rest) || routed(other) == Some(rest))
     };
