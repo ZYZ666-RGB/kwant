@@ -1890,6 +1890,24 @@ mod tests {
         // Both notes are used up: a later failure keeps its own reason
         log.observe(&pending("c", TOOL, held_args.clone()));
         assert_eq!(words_of(&mut log, failed("c", own)), own_reason);
+
+        // Through kwnt's gateway the step is named mcp__kwnt__<server>__<tool> while the gate notes
+        // mcp__<server>__<tool> (Rigel's 28q QA finding 2): the engine's id still finds its own
+        // step, whichever of the two ends first, and never the neighbour's
+        const STEP_TOOL: &str = "mcp__kwnt__github__create_or_update_file";
+        for held_first in [false, true] {
+            let mut log = ActivityLog::default();
+            log.observe(&pending("toolu_other", STEP_TOOL, other_args.clone()));
+            log.observe(&pending("toolu_held", STEP_TOOL, held_args.clone()));
+            log.refused_call(TOOL, Some("toolu_held"), Some(&held_args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+            if held_first {
+                assert_eq!(words_of(&mut log, failed("toolu_held", gate)), blocked, "gateway name, held ends first");
+                assert_eq!(words_of(&mut log, failed("toolu_other", own)), own_reason, "gateway name, held ends first");
+            } else {
+                assert_eq!(words_of(&mut log, failed("toolu_other", own)), own_reason, "gateway name, other ends first");
+                assert_eq!(words_of(&mut log, failed("toolu_held", gate)), blocked, "gateway name, other ends first");
+            }
+        }
     }
 
     /// 28k: a denial whose card stopped waiting with no answer (it couldn't stay open, or it was

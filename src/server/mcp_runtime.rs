@@ -1448,8 +1448,11 @@ pub async fn permission_endpoint(
                     None => Ok(Default::default()),
                 },
             };
-            // 28k: the gate's refusal is its own text to the bot, and "Blocked before push" on the step
-            let held = || super::activity::refused(&session.turn_id, tool_name, mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+            // 28k: the gate's refusal is its own text to the bot, and "Blocked before push" on the step.
+            // 28q: keyed to this call's own tool-use id (the id claude puts on the step), so a
+            // neighbouring call of the same tool that failed on its own keeps its own reason
+            let call = args["tool_use_id"].as_str();
+            let held = || super::activity::refused(&session.turn_id, tool_name, call, &args["input"], mcp::PREPUSH_BLOCKED_STEP_DETAIL);
             let decision = match prepush {
                 Err(why) => {
                     held();
