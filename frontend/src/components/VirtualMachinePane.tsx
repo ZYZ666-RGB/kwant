@@ -35,7 +35,7 @@ import { showOnce, showOnceStore, useShowOnce } from '../showOnce';
 import { RecordStepsButton, RecordingStrip } from './ShowOnce';
 import { PointLayer, PointSink } from './PointLayer';
 import { POINT_COPY, footerText } from '../point';
-import { choosePage, noteTitle, ownNewestPage, pageOpened, pageTeam, pageTitleOf, restingPage, shownPage, stepPage, trailTime, type ReplyPage } from '../browserPages';
+import { addressToShow, choosePage, noteTitle, ownNewestPage, pageOpened, pageTeam, pageTitleOf, restingPage, shownPage, stepPage, trailTime, type ReplyPage } from '../browserPages';
 import { useBrowserPages } from '../useBrowserPages';
 import { BrowserPageStrip } from './BrowserPageStrip';
 import { secondsText } from '../clock';
@@ -190,7 +190,9 @@ export const VirtualMachinePane: React.FC<VirtualMachinePaneProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<PaneTab>(() => chosenPaneTab(teamId));
   useEffect(() => rememberPaneTab(teamId, activeTab), [teamId, activeTab]);
-  const [inputUrl, setInputUrl] = useState(activeUrl);
+  // 28r: what was last written into the address field, and for which tab (see `fieldKey` below)
+  // 28x: `typed` marks the person's own text, which only a real change of address may replace
+  const [written, setWritten] = useState<{ key: string; url: string; typed?: boolean } | null>(null);
   // No event fires when the browser catches a login, so a new screenshot or page loads the list again.
   const passwords = useSavedPasswords(teamId, `${activeUrl}|${screenshotBase64?.length ?? 0}|${screenshotBase64?.slice(-32) ?? ''}`);
   const savedCount = passwords.logins.length;
@@ -285,10 +287,13 @@ export const VirtualMachinePane: React.FC<VirtualMachinePaneProps> = ({
   // Shown for a moment after the CAPTCHA closes by itself, before control goes back to the bot
   const [solvedNote, setSolvedNote] = useState(false);
 
-  // Once the stream reports where the tab is, trust it; before that, the last URL the app heard of.
-  const pageUrl = stream.location ? stream.location.url : chosenPage ? pageInfo?.url ?? '' : activeUrl;
-  // The same for the title: a new page's empty title must not fall back to the previous page's.
-  const shownTitle = stream.location ? stream.location.title : chosenPage ? pageInfo?.title ?? '' : pageTitle;
+  // Once the chosen page's own stream reports where the tab is, trust it; before that, that page's listed
+  // address; with no page chosen, the last URL the app heard of (28r: one rule, shared with the field).
+  const pageUrl = addressToShow({ location: stream.location, chosen: chosenPage, listedUrl: pageInfo?.url, activeUrl });
+  // The same for the title: a new page's empty title must not fall back to the previous page's, and (28u)
+  // only the chosen page's own stream names it, so the tab just left never lends its title for a render.
+  const ownLocation = stream.location && stream.location.page === chosenPage ? stream.location : null;
+  const shownTitle = ownLocation ? ownLocation.title : chosenPage ? pageInfo?.title ?? '' : pageTitle;
   // A blank light frame from Chrome (a page committing) waits behind the last good picture: no grey flash
   const steady = useSteadyFrame(stream.frame, stream.acknowledgeFrame);
   const controlError = stream.error || (!stream.connected ? browserError : null);
@@ -304,16 +309,39 @@ export const VirtualMachinePane: React.FC<VirtualMachinePaneProps> = ({
   useEffect(() => {
     if (blankFrameId !== undefined) acknowledgeFrame(blankFrameId);
   }, [blankFrameId, acknowledgeFrame]);
+  // 28r: the address field follows the tab. A value typed or reported belongs to the tab it was written for;
+  // for any other tab the field shows that tab's listed address (none or a blank tab: empty), in the same
+  // render as the pick, so the old tab's address never shows under the new one. While the list is still on
+  // its way nothing is chosen yet: empty, not another bot's last address. No page chosen: as before.
+  const fieldKey = chosenPage ? `page:${chosenPage}` : pagesKnown ? 'default' : 'waiting';
+  // 28x (Rigel's 28r P1): leaving a tab drops what its stream wrote, so coming back shows the newer listed
+  // address, not the old one; text the person typed stays. Set during render, so the tap render is right.
+  const [fieldSeen, setFieldSeen] = useState(fieldKey);
+  if (fieldSeen !== fieldKey) {
+    setFieldSeen(fieldKey);
+    if (written && !written.typed && written.key === fieldSeen) setWritten(null);
+  }
+  const inputUrl = written?.key === fieldKey
+    ? written.url
+    : chosenPage ? (isBlankPage(pageInfo?.url) ? '' : pageInfo?.url ?? '') : pagesKnown ? activeUrl : '';
+  const setInputUrl = (url: string) => setWritten({ key: fieldKey, url, typed: true });
+  // Then the stream takes over, but only the chosen page's own: a late message from the page just left
+  // never writes its address. A blank tab's own about:blank keeps the field empty (28u), as its chip says
+  // "nothing open"; pageUrl keeps the raw value for the blank check and the picture.
   useEffect(() => {
-    if (stream.location?.url) setInputUrl(stream.location.url);
+    if (stream.location?.url && stream.location.page === chosenPage) setWritten({ key: fieldKey, url: isBlankPage(stream.location.url) ? '' : stream.location.url });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stream.location]);
   // The pane's own stream knows each page's title too, so the trail can name pages the bot opened
   useEffect(() => {
     noteTitle(stream.location?.url, stream.location?.title);
   }, [stream.location?.url, stream.location?.title]);
 
+  // The app's last known address is any bot's, not the selected tab's: it writes the field only when no
+  // page is chosen (an older server with no pages route)
   useEffect(() => {
-    setInputUrl(activeUrl);
+    if (!chosenPage && pagesKnown) setWritten({ key: fieldKey, url: activeUrl });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeUrl]);
 
   // "Solve it" on the card or a CAPTCHA notification: take control once the stream is up
