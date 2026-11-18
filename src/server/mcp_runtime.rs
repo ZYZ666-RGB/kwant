@@ -575,8 +575,15 @@ impl BrokerApprover {
             // 27b: only the person's own no is remembered, not a dropped card. A card that was
             // withdrawn or whose channel dropped (28k) runs nothing either, but it wasn't the
             // person's no, so its step settled `stopped` above
+            // 29o: a Deny with the person's reason goes back to the call, and its family isn't
+            // remembered: they said what to do instead, and the adjusted call gets its own card
             Ok(Ok(ApprovalDecision::Deny)) => {
-                self.broker.declined.record(&req.kwant_id, &self.conversation, &families, &ticket);
+                match self.broker.take_deny_reason(&ticket) {
+                    Some(why) => {
+                        mcp::tell_deny_reason(why);
+                    }
+                    None => self.broker.declined.record(&req.kwant_id, &self.conversation, &families, &ticket),
+                }
                 ApprovalOutcome::Denied
             }
             Ok(Err(_)) => ApprovalOutcome::Denied,
@@ -1444,15 +1451,16 @@ async fn decide(session: &PermissionSession, args: &Value, smart: bool, grant: O
         payment: None,
     };
     // A push the person's Retry or Override covers skips the ordinary card (0.9.7)
-    let approval = async {
+    // 29o: and a Deny may come with the person's reason
+    let approval = mcp::hear_deny_reason(async {
         match grant {
             Some(g) => session.ctx.approver.decide_granted(req, g).await,
             None => session.ctx.approver.decide(req).await,
         }
-    };
+    });
     // Dropping the approval withdraws its card when the turn ends first
-    let outcome = tokio::select! {
-        outcome = approval => outcome,
+    let (outcome, reason) = tokio::select! {
+        heard = approval => heard,
         _ = session.ended.cancelled() => {
             session.ctx.record(cancelled_record(&tool_use_id, tool_name, server, tool, &input));
             return json!({"behavior": "deny", "message": "The turn ended before the user answered."});
@@ -1474,9 +1482,9 @@ async fn decide(session: &PermissionSession, args: &Value, smart: bool, grant: O
     if outcome.allowed() {
         json!({"behavior": "allow", "updatedInput": input})
     } else if remind {
-        json!({"behavior": "deny", "message": mcp::with_no_false_claims(outcome.refusal_text())})
+        json!({"behavior": "deny", "message": mcp::with_no_false_claims(&outcome.refusal(reason.as_deref()))})
     } else {
-        json!({"behavior": "deny", "message": outcome.refusal_text()})
+        json!({"behavior": "deny", "message": outcome.refusal(reason.as_deref())})
     }
 }
 
@@ -1914,6 +1922,35 @@ mod declined_tests {
         Drop,
         /// Nobody answers before the approver stops waiting.
         Nothing,
+        /// 29o: answered through the app's route, `{decision, reason}` as the card sends it.
+        Route(&'static str, Option<&'static str>),
+    }
+
+    /// 29o: the person answers card `id` through the app's route with `{decision, reason}`:
+    /// the route's reply.
+    async fn answer_route(state: &AppState, id: &str, decision: &str, reason: Option<&str>) -> Value {
+        let mut body = json!({"decision": decision});
+        if let Some(r) = reason {
+            body["reason"] = json!(r);
+        }
+        let payload = serde_json::from_value(body).expect("the card's body parses");
+        let resp = super::super::routes::resolve_approval(State(state.clone()), Path(id.to_string()), Json(payload))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap()
+    }
+
+    /// 29o: what the bot hears when the person said no with `reason` (the brief's words).
+    fn said_why(reason: &str) -> String {
+        format!(
+            "The user denied this tool call and said why: \"{reason}\". Don't make this same call again. \
+If what they said points to another way, you may try that; it will ask them again. Otherwise say in your reply what you couldn't do."
+        )
+    }
+
+    const fn why(reason: &'static str) -> Answer {
+        Answer::Route("deny", Some(reason))
     }
 
     /// `a.decide(req)`, answering the card it shows with `answer`: the outcome and the card's
@@ -1934,6 +1971,9 @@ mod declined_tests {
                             Answer::Decide(d) => assert!(broker.resolve(&id, d).await),
                             Answer::Drop => assert!(broker.cancel(&id).await),
                             Answer::Nothing => {}
+                            Answer::Route(d, r) => {
+                                answer_route(&e.state, &id, d, r).await;
+                            }
                         }
                         card = Some(id);
                     }
@@ -2107,8 +2147,12 @@ mod declined_tests {
                 resp = &mut prompt => break resp.unwrap(),
                 ev = events.recv() => {
                     if let Ok(RuntimeEvent::ApprovalRequired { id, .. }) = ev {
-                        if let Answer::Decide(d) = answer.clone() {
-                            assert!(e.state.broker.resolve(&id, d).await);
+                        match answer.clone() {
+                            Answer::Decide(d) => assert!(e.state.broker.resolve(&id, d).await),
+                            Answer::Route(d, r) => {
+                                answer_route(&e.state, &id, d, r).await;
+                            }
+                            Answer::Drop | Answer::Nothing => {}
                         }
                         card = Some(id);
                     }
@@ -2132,6 +2176,139 @@ mod declined_tests {
         let (reply, card) = claude_asks(&e, "Bash", json!({"command": "git push --force origin main"}), ALLOW).await;
         assert_eq!(card, None, "no card the second time");
         assert_eq!(reply, json!({"behavior": "deny", "message": mcp::DECLINED_BEFORE_TEXT}));
+    }
+
+    /// 29o (a, b, c) on claude's permission prompt: the card's `{decision: "deny", reason}` reaches
+    /// the bot as one trimmed line of at most 500 chars, and the same family asks again; the old
+    /// body, an empty reason and a plain Deny still tell it `DENIED_TEXT` word for word, and only
+    /// the plain Deny is remembered (27b).
+    #[tokio::test]
+    async fn claude_hears_why_the_person_said_no() {
+        let e = setup().await;
+        let denied = |message: String| json!({"behavior": "deny", "message": message});
+        let push = |args: &str| json!({"command": format!("git push {args}")});
+        let (reply, card) = claude_asks(&e, "Bash", push("--force origin main"), why("  push without\n--force \r\n")).await;
+        assert!(card.is_some());
+        assert_eq!(reply, denied(said_why("push without --force")));
+
+        // Capped at 500 chars, on a char boundary
+        let long: &'static str = "é".repeat(501).leak();
+        let (reply, card) = claude_asks(&e, "Bash", push("origin main"), why(long)).await;
+        assert!(card.is_some(), "a no with a reason isn't remembered: the same family asks again");
+        assert_eq!(reply, denied(said_why(&"é".repeat(500))));
+
+        // Nothing left of the reason, or the old body: a plain Deny, remembered as before (27b)
+        let (reply, card) = claude_asks(&e, "Bash", push("origin dev"), why("  \n\t ")).await;
+        assert!(card.is_some());
+        assert_eq!(reply, denied(mcp::DENIED_TEXT.to_string()));
+        let (reply, card) = claude_asks(&e, "Bash", json!({"command": "gh pr merge 7"}), Answer::Route("deny", None)).await;
+        assert!(card.is_some());
+        assert_eq!(reply, denied(mcp::DENIED_TEXT.to_string()));
+        for command in ["git push origin main", "gh pr merge 8"] {
+            let (reply, card) = claude_asks(&e, "Bash", json!({"command": command}), ALLOW).await;
+            assert_eq!(card, None, "{command}");
+            assert_eq!(reply, denied(mcp::DECLINED_BEFORE_TEXT.to_string()), "{command}");
+        }
+
+        // A reason on an Allow is ignored: the call runs
+        let (reply, card) = claude_asks(&e, "Bash", json!({"command": "npm publish"}), Answer::Route("allow_once", Some("fine"))).await;
+        assert!(card.is_some());
+        assert_eq!(reply["behavior"], "allow");
+        assert_eq!(e.state.broker.deny_reasons_held(), 0, "nothing left behind");
+    }
+
+    /// 29o (c) on the approver itself: after a no with a reason, a call of the same family gets
+    /// its own card, so nothing runs without the person's yes.
+    #[tokio::test]
+    async fn a_no_with_a_reason_lets_the_adjusted_call_ask() {
+        let e = setup().await;
+        let a = approver(&e, &e.general, Duration::from_secs(10));
+        let (out, card) = ask(&e, &a, bash(&e.bot, "git push --force origin main"), why("push without --force")).await;
+        assert_eq!((out, card.is_some()), (ApprovalOutcome::Denied, true));
+        let (out, card) = ask(&e, &a, bash(&e.bot, "git push origin main"), ALLOW).await;
+        assert_eq!((out, card.is_some()), (ApprovalOutcome::Allowed, true), "the adjusted call asks, and the person allows it");
+        let (out, card) = ask(&e, &a, bash(&e.bot, "git push origin main"), DENY).await;
+        assert_eq!((out, card.is_some()), (ApprovalOutcome::Denied, true));
+        let (out, card) = ask(&e, &a, bash(&e.bot, "git push origin dev"), ALLOW).await;
+        assert_eq!((out, card), (ApprovalOutcome::DeclinedBefore, None), "a plain no still stays a no");
+        assert_eq!(e.state.broker.deny_reasons_held(), 0);
+    }
+
+    /// 29o (d): a late Deny with a reason (its turn stopped waiting) answers as a plain late Deny
+    /// does, and keeps nothing for a call that will never come.
+    #[tokio::test]
+    async fn a_late_deny_with_a_reason_answers_as_today() {
+        let e = setup().await;
+        let a = approver(&e, &e.general, Duration::from_millis(200));
+        let mut bodies = vec![];
+        for (n, reason) in [(1, None), (2, Some("use staging"))] {
+            let (out, card) = ask(&e, &a, bash(&e.bot, &format!("gh pr merge {n}")), Answer::Nothing).await;
+            assert_eq!(out, ApprovalOutcome::Unanswered);
+            let card = card.unwrap();
+            let mut body = answer_route(&e.state, &card, "deny", reason).await;
+            assert_eq!(body["ticket_id"], json!(card));
+            body.as_object_mut().unwrap().remove("ticket_id");
+            bodies.push(body);
+        }
+        assert_eq!(bodies[0], bodies[1]);
+        assert_eq!(bodies[1], json!({"resolved": true, "status": "denied", "resumed": false}));
+        assert_eq!(e.state.broker.deny_reasons_held(), 0, "nothing kept for a call that won't come");
+    }
+
+    /// 29o (b) on kwnt's own tool calls (an API engine, codex, grok and claude through the
+    /// gateway): the bot's tool result says why the person said no; a plain Deny still says
+    /// `DENIED_TEXT` (`an_api_bot_s_tool_result_says_it_was_already_declined`).
+    #[tokio::test]
+    async fn an_api_bot_s_tool_result_says_why_the_person_said_no() {
+        let e = setup().await;
+        let (_, token) = prepare_turn_with_opts(&e.state, &e.bot, Some("t-host-why".into()), None, None, Default::default()).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = super::super::create_router(e.state.clone());
+        let serve = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server = http_server("perm", &format!("http://{addr}/api/mcp/permission/{token}"));
+        let ctx = McpTurnContext {
+            servers: vec![server],
+            approver: Arc::new(approver(&e, &e.general, Duration::from_secs(10))),
+            config_dir: std::env::temp_dir(),
+            permission_url: None,
+            gateway: None,
+            max_tool_iterations: 5,
+            approvals: mcp::Approvals::Ask,
+            records: Default::default(),
+            kwnt_only: false,
+            media: None,
+        };
+        let (session, problems) = McpToolSession::open(&ctx, None).await;
+        assert!(problems.is_empty(), "{problems:?}");
+        let caller = Caller { kwant_id: e.bot.id.clone(), kwant_name: e.bot.name.clone(), turn_id: "t-api-why".into() };
+
+        let mut events = e.state.event_sender.subscribe();
+        let mut cards = 0;
+        for (n, reason) in [(1, "use the read-only tool\ninstead"), (2, "ask Ada first")] {
+            let call_id = format!("c{n}");
+            let call = session.call(&caller, &call_id, "mcp__perm__approve", r#"{"tool_name": "Bash", "input": {}}"#);
+            tokio::pin!(call);
+            let out = loop {
+                tokio::select! {
+                    out = &mut call => break out,
+                    ev = events.recv() => {
+                        if let Ok(RuntimeEvent::ApprovalRequired { id, .. }) = ev {
+                            cards += 1;
+                            answer_route(&e.state, &id, "deny", Some(reason)).await;
+                        }
+                    }
+                }
+            };
+            let heard = said_why(&reason.replace('\n', " "));
+            assert_eq!((out.status, out.text.as_str()), ("denied", heard.as_str()));
+            assert_eq!(out.record["status"], "denied");
+        }
+        assert_eq!(cards, 2, "the second call asked: a no with a reason isn't remembered");
+        assert_eq!(e.state.broker.deny_reasons_held(), 0);
+        session.shutdown().await;
+        finish_turn(&e.state, &token).await;
+        serve.abort();
     }
 
     #[tokio::test]
