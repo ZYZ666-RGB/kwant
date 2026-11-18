@@ -267,7 +267,7 @@ impl ActivityLog {
     /// refused a call that names its own secret files, or a ticket couldn't be stored) wasn't the
     /// person's no: `None`, and the step stays `failed`.
     fn declined_card_for(&self, i: usize, status: &str, why: Option<&str>) -> Option<usize> {
-        if status != "failed" || !why.is_some_and(|w| w.starts_with(crate::mcp::DENIED_TEXT)) {
+        if status != "failed" || !the_cli_denied(why) {
             return None;
         }
         let tool = self.steps[i].tool.as_deref()?;
@@ -342,7 +342,7 @@ impl ActivityLog {
         if let Some(k) = self.refusal_for(id, tool.as_deref(), args) {
             return Some(self.refused.remove(k).words);
         }
-        if !why.is_some_and(|w| w.starts_with(crate::mcp::DENIED_TEXT)) {
+        if !the_cli_denied(why) {
             return None;
         }
         let stopped = (0..self.steps.len()).find(|j| {
@@ -703,6 +703,14 @@ pub fn failed_reason(result: &Value) -> Option<Option<&str>> {
             .iter()
             .find_map(|k| result[*k].as_str().map(str::trim).filter(|s| !s.is_empty())),
     )
+}
+
+/// Whether a failed step's reason `why`, as [`step_end`] left it, is the CLI's denial
+/// ([`crate::mcp::DENIED_TEXT`]). `step_end` drops that text's last sentence (27b,
+/// [`crate::mcp::NOT_ANOTHER_WAY_TEXT`]), so only its first sentence is read.
+fn the_cli_denied(why: Option<&str>) -> bool {
+    let first = crate::mcp::DENIED_TEXT.split_inclusive('.').next().unwrap_or(crate::mcp::DENIED_TEXT);
+    why.is_some_and(|w| w.starts_with(first))
 }
 
 /// How a finished tool call's step ends, and the detail it shows (26b). A call nobody approved
