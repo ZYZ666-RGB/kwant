@@ -586,6 +586,8 @@ impl BrokerApprover {
                 }
                 ApprovalOutcome::Denied
             }
+            // The card was withdrawn or its channel dropped (28k): nothing runs, but it wasn't
+            // the person's no, so its step settled `stopped` above
             Ok(Err(_)) => ApprovalOutcome::Denied,
             // Nobody answered: the card stays up as `waiting`, and a late Allow resumes the work
             // (see `resume_late_approval`)
