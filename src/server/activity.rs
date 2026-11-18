@@ -130,8 +130,21 @@ pub fn approval_waiting(turn_id: &str, ticket: &str, tool_name: &str) {
 /// engine's id for the call when kwnt was told it, and `arguments` its arguments, so the words land
 /// on that call's step and not on another call of the same tool (28q).
 pub fn refused(turn_id: &str, tool_name: &str, call: Option<&str>, arguments: &Value, words: &'static str) {
+    refused_as(turn_id, tool_name, None, call, arguments, words);
+}
+
+/// [`refused`] for a call the engine made under another name, `called_as`: grok's name for
+/// `tool_name` on kwnt's gateway, which grok's step carries instead of an id (29g).
+pub fn refused_as(
+    turn_id: &str,
+    tool_name: &str,
+    called_as: Option<&str>,
+    call: Option<&str>,
+    arguments: &Value,
+    words: &'static str,
+) {
     if let Some(turn) = TurnActivity::find(turn_id) {
-        turn.with_log(|log| log.refused_call(tool_name, call, Some(arguments), words));
+        turn.with_log(|log| log.refused_call_as(tool_name, called_as, call, Some(arguments), words));
     }
 }
 

@@ -247,16 +247,19 @@ impl McpToolSession {
     /// appended to the turn's `tool_calls`. `call_id` is also the engine's id for the call, the one
     /// its activity step carries (the API driver's).
     pub async fn call(&self, caller: &Caller, call_id: &str, name: &str, raw_arguments: &str) -> CallOutcome {
-        self.call_step(caller, call_id, Some(call_id), name, raw_arguments).await
+        self.call_step(caller, call_id, Some(call_id), None, name, raw_arguments).await
     }
 
     /// [`call`](Self::call) for a call whose engine id, `step_id`, differs from kwnt's `call_id`
     /// (the gateway's), or is unknown: a refusal kwnt notes on its activity step is keyed to it (28q).
+    /// `called_as` is the name the engine called `name` under when that differs (grok's, 29g), so
+    /// the refusal also finds a step that carries that name and no id.
     pub async fn call_step(
         &self,
         caller: &Caller,
         call_id: &str,
         step_id: Option<&str>,
+        called_as: Option<&str>,
         name: &str,
         raw_arguments: &str,
     ) -> CallOutcome {
@@ -318,7 +321,7 @@ impl McpToolSession {
                 // 28k: a push the gate holds shows "Blocked before push" on its step; the bot
                 // gets the gate's own text. 28q: on its own step, never on another call of the tool
                 let held = || {
-                    crate::server::activity::refused(&caller.turn_id, name, step_id, &arguments, super::PREPUSH_BLOCKED_STEP_DETAIL)
+                    crate::server::activity::refused_as(&caller.turn_id, name, called_as, step_id, &arguments, super::PREPUSH_BLOCKED_STEP_DETAIL)
                 };
                 match self.ctx.approver.prepush_gate(&req).await {
                     Err(why) => {
