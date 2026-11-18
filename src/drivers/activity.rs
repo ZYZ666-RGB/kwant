@@ -312,11 +312,11 @@ impl ActivityLog {
             return Some(k);
         }
         let tool = tool?;
-        let free = |r: &Refusal| r.tool == tool && r.call.as_ref().is_none_or(|c| !self.tools.contains_key(c));
+        let free = |r: &Refusal| same_tool(&r.tool, tool) && r.call.as_ref().is_none_or(|c| !self.tools.contains_key(c));
         if let Some(k) = self.refused.iter().position(|r| free(r) && r.args.is_some() && r.args.as_ref() == args) {
             return Some(k);
         }
-        let alone = !self.tools.values().any(|&j| self.steps[j].tool.as_deref() == Some(tool));
+        let alone = !self.tools.values().any(|&j| self.steps[j].tool.as_deref().is_some_and(|t| same_tool(t, tool)));
         if alone {
             self.refused.iter().position(free)
         } else {
@@ -659,6 +659,23 @@ const TOKEN_PREFIXES: [&str; 12] = [
 /// tool servers. The same list the chat's page trail counts (`frontend/src/browserPages.ts`).
 /// WebFetch isn't one: it never touches the bot's browser.
 pub const PAGE_OPEN_TOOLS: [&str; 4] = ["browser_open", "browser_navigate", "navigate", "open_url"];
+
+/// Whether tool names `a` and `b` name the same tool (29b): equal, or one is the name an engine
+/// gives a call through kwnt's gateway, `mcp__kwnt__<server>__<tool>` (or `mcp__kwant__…`), and
+/// the other the `mcp__<server>__<tool>` that call stands for, the name kwnt's gate notes. Only a
+/// gateway name with a `__` left after the prefix stands for another server's tool, so kwnt's own
+/// tools (`mcp__kwnt__browser_open`) only ever match themselves.
+fn same_tool(a: &str, b: &str) -> bool {
+    let routed = |name: &str| {
+        name.strip_prefix("mcp__kwnt__")
+            .or_else(|| name.strip_prefix("mcp__kwant__"))
+            .filter(|rest| rest.contains("__"))
+    };
+    let stands_for = |gateway: &str, other: &str| {
+        routed(gateway).is_some_and(|rest| other.strip_prefix("mcp__") == Some(rest) || routed(other) == Some(rest))
+    };
+    a == b || stands_for(a, b) || stands_for(b, a)
+}
 
 /// Whether a tool (`browser_open`, `mcp__kwnt__browser_open`, …) opens a page in the bot's browser.
 pub fn opens_page(tool: &str) -> bool {
@@ -1964,6 +1981,103 @@ mod tests {
                 assert_eq!(words_of(&mut log, failed("toolu_other", own)), own_reason, "gateway name, other ends first");
                 assert_eq!(words_of(&mut log, failed("toolu_held", gate)), blocked, "gateway name, other ends first");
             }
+        }
+    }
+
+    /// 29b (28q's Open, Rigel's 28q QA finding 1): Codex and other engines that reach kwnt's
+    /// gateway send no id and name the step `mcp__kwnt__<server>__<tool>`, while the gate notes
+    /// `mcp__<server>__<tool>`. The two names are one tool, so the held push still gets "Blocked
+    /// before push; nothing ran" by its arguments or as the one left open, and never a neighbour.
+    #[test]
+    fn a_held_push_through_the_gateway_finds_its_step_without_an_id() {
+        const NOTED: &str = "mcp__github__create_or_update_file";
+        const STEP: &str = "mcp__kwnt__github__create_or_update_file";
+        let gate = "kwant is checking this push of main before it goes (pre-push card pp1). Nothing was pushed.";
+        let own = "409 Conflict: README.md changed on the branch";
+        let other_args = json!({"owner": "o", "repo": "r", "branch": "lin-x", "path": "README.md"});
+        let held_args = json!({"owner": "o", "repo": "r", "branch": "main", "path": "src/lib.rs"});
+        let failed = |id: &str, error: &str| RuntimeEvent::ToolCallCompleted {
+            id: id.into(),
+            result: json!({"status": "error", "error": error}),
+        };
+        let words_of = |log: &mut ActivityLog, ev: RuntimeEvent| {
+            let ended = log.observe(&ev);
+            (ended[0].status, ended[0].detail.clone().unwrap_or_default())
+        };
+        let own_reason = ("failed", own.to_string());
+        let blocked = ("failed", crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL.to_string());
+
+        for step in [STEP, "mcp__kwant__github__create_or_update_file"] {
+            // (a) The one open step of that tool, a note with no id: the held push gets the words,
+            // whether the note's arguments match the shown ones or not
+            for args in [held_args.clone(), json!("{\"content\": \"…")] {
+                let mut log = ActivityLog::default();
+                log.observe(&pending("held", step, args));
+                log.refused_call(NOTED, None, Some(&held_args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+                assert_eq!(words_of(&mut log, failed("held", gate)), blocked, "{step}: the one open");
+            }
+
+            // (b) Two open, a note with no id and equal arguments: only the matching one gets the
+            // words, the other keeps its own 409, in both end orders
+            for held_first in [false, true] {
+                let mut log = ActivityLog::default();
+                log.observe(&pending("other", step, other_args.clone()));
+                log.observe(&pending("held", step, held_args.clone()));
+                log.refused_call(NOTED, None, Some(&held_args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+                if held_first {
+                    assert_eq!(words_of(&mut log, failed("held", gate)), blocked, "{step}: held ends first");
+                    assert_eq!(words_of(&mut log, failed("other", own)), own_reason, "{step}: held ends first");
+                } else {
+                    assert_eq!(words_of(&mut log, failed("other", own)), own_reason, "{step}: other ends first");
+                    assert_eq!(words_of(&mut log, failed("held", gate)), blocked, "{step}: other ends first");
+                }
+            }
+
+            // Two open, no id and shown arguments that don't match: never a guess between two
+            let mut log = ActivityLog::default();
+            log.observe(&pending("other", step, other_args.clone()));
+            log.observe(&pending("held", step, json!("{\"content\": \"…")));
+            log.refused_call(NOTED, None, Some(&held_args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+            assert_eq!(words_of(&mut log, failed("other", own)), own_reason, "{step}: two open, no guess");
+            assert_eq!(words_of(&mut log, failed("held", gate)), blocked, "{step}: the one left open");
+        }
+
+        // (c) kwnt's own tools are only themselves: a note for `mcp__browser_open` never names the
+        // step `mcp__kwnt__browser_open` (nothing is left after the prefix to be a server's tool)
+        for step in ["mcp__kwnt__browser_open", "mcp__kwant__browser_open", "mcp__kwnt_tools__browser_open"] {
+            let mut log = ActivityLog::default();
+            log.observe(&pending("b", step, json!({"url": "https://example.com"})));
+            log.refused_call("mcp__browser_open", None, None, crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+            assert_eq!(words_of(&mut log, failed("b", own)), own_reason, "{step} is not mcp__browser_open");
+        }
+        // The other way round too, and a gateway name never matches another server's tool
+        let mut log = ActivityLog::default();
+        log.observe(&pending("b", "mcp__browser_open", json!({"url": "https://example.com"})));
+        log.refused_call("mcp__kwnt__browser_open", None, None, crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+        assert_eq!(words_of(&mut log, failed("b", own)), own_reason, "mcp__browser_open is not mcp__kwnt__browser_open");
+        let mut log = ActivityLog::default();
+        log.observe(&pending("g", STEP, held_args.clone()));
+        log.refused_call("mcp__gitlab__create_or_update_file", None, Some(&held_args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+        assert_eq!(words_of(&mut log, failed("g", own)), own_reason, "another server's tool");
+
+        // The rule itself
+        for (a, b, same) in [
+            (STEP, NOTED, true),
+            (NOTED, STEP, true),
+            ("mcp__kwant__github__create_or_update_file", NOTED, true),
+            ("mcp__kwant__github__create_or_update_file", STEP, true),
+            ("mcp__kwnt__house__intent__HassTurnOff", "mcp__house__intent__HassTurnOff", true),
+            (NOTED, NOTED, true),
+            ("mcp__kwnt__browser_open", "mcp__kwnt__browser_open", true),
+            ("mcp__kwnt__browser_open", "mcp__browser_open", false),
+            ("mcp__kwnt__browser_open", "browser_open", false),
+            ("mcp__kwnt_tools__browser_open", "mcp__browser_open", false),
+            ("mcp__kwnt_tools__github__x", "mcp__github__x", false),
+            (STEP, "github__create_or_update_file", false),
+            (STEP, "mcp__github__create_issue", false),
+            ("Bash", "mcp__Bash", false),
+        ] {
+            assert_eq!(same_tool(a, b), same, "same_tool({a}, {b})");
         }
     }
 
