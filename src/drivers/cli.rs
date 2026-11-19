@@ -71,14 +71,35 @@ fn kill_group(pid: Option<u32>) {
 /// Starts the CLI as the leader of its own process group, for [`ProcessGroup`].
 /// On Windows the CLI gets no console window of its own (`CREATE_NO_WINDOW`); its tree is held
 /// by the Job Object [`ProcessGroup::of`] puts it in.
+/// On Linux it is also first in line when memory runs out ([`OOM_FIRST`]): a runaway build a
+/// bot started is stopped before kwnt is.
 pub(crate) fn own_process_group(cmd: &mut Command) {
     #[cfg(unix)]
     cmd.process_group(0);
+    #[cfg(target_os = "linux")]
+    // SAFETY: open(2), write(2) and close(2) are async-signal-safe; the path and value are
+    // static, so nothing is allocated or touched in this process's memory
+    unsafe {
+        cmd.pre_exec(|| {
+            // Raising one's own score needs no privilege; a missing /proc is fine too
+            let fd = libc::open(c"/proc/self/oom_score_adj".as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+            if fd >= 0 {
+                libc::write(fd, OOM_FIRST.as_ptr().cast(), OOM_FIRST.len());
+                libc::close(fd);
+            }
+            Ok(())
+        });
+    }
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     #[cfg(not(any(unix, windows)))]
     let _ = cmd;
 }
+
+/// Written to `/proc/self/oom_score_adj` of everything kwant starts on the host: the highest
+/// score, inherited by all it starts, so the kernel stops the bot's work before kwnt.
+#[cfg(target_os = "linux")]
+const OOM_FIRST: &[u8] = b"1000";
 
 /// `CREATE_NO_WINDOW`: a console program started by the (windowless) app opens no console window.
 #[cfg(windows)]
@@ -3327,5 +3348,21 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\n
             assert!(why.contains("MCP servers"), "{why}");
             assert!(!fake.path("ran").exists());
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod oom_tests {
+    use super::*;
+
+    // Covers the CLI spawns (claude, codex, grok…): they go through own_process_group too
+    #[tokio::test]
+    async fn a_cli_started_in_its_own_group_is_first_when_memory_runs_out() {
+        let mut cmd = Command::new("cat");
+        cmd.arg("/proc/self/oom_score_adj").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        own_process_group(&mut cmd);
+        let out = cmd.output().await.unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1000");
     }
 }
