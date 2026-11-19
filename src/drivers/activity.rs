@@ -111,6 +111,9 @@ struct Refusal {
     call: Option<String>,
     /// The call's arguments, when kwnt knows them.
     args: Option<Value>,
+    /// The name the engine called the tool under, when that isn't `tool`: grok's name for it on
+    /// kwnt's gateway (29g), which grok's step carries (see [`grok_gateway_call`]).
+    called_as: Option<String>,
     /// What the step shows instead of the text the bot was told.
     words: &'static str,
 }
@@ -295,10 +298,25 @@ impl ActivityLog {
     /// (its step's id) and `args` its arguments, when kwnt knows them, so a neighbouring call of
     /// the same tool that fails for its own reason keeps that reason (28q).
     pub fn refused_call(&mut self, tool: &str, call: Option<&str>, args: Option<&Value>, words: &'static str) {
+        self.refused_call_as(tool, None, call, args, words);
+    }
+
+    /// [`refused_call`](Self::refused_call) for a call the engine made under another name,
+    /// `called_as`: grok's name for `tool` on kwnt's gateway (29g). grok sends no id, and its step
+    /// carries that name, not `tool`, so the step is found by it (see [`grok_gateway_call`]).
+    pub fn refused_call_as(
+        &mut self,
+        tool: &str,
+        called_as: Option<&str>,
+        call: Option<&str>,
+        args: Option<&Value>,
+        words: &'static str,
+    ) {
         self.refused.push(Refusal {
             tool: tool.to_string(),
             call: call.filter(|c| !c.is_empty()).map(str::to_string),
             args: args.cloned(),
+            called_as: called_as.filter(|n| !n.is_empty()).map(str::to_string),
             words,
         });
     }
@@ -309,19 +327,46 @@ impl ActivityLog {
     /// - else one of that tool with the same arguments;
     /// - else, only when no other step of that tool is still open, one of that tool.
     ///
-    /// A refusal whose id names another step still open waits for that step.
+    /// A refusal whose id names another step still open waits for that step. A grok step through
+    /// kwnt's gateway is of the tool its refusal was called as, with that call's own arguments (29g).
     fn refusal_for(&self, id: &str, tool: Option<&str>, args: Option<&Value>) -> Option<usize> {
         if let Some(k) = self.refused.iter().position(|r| r.call.as_deref() == Some(id)) {
             return Some(k);
         }
         let tool = tool?;
-        let free = |r: &Refusal| same_tool(&r.tool, tool) && r.call.as_ref().is_none_or(|c| !self.tools.contains_key(c));
-        if let Some(k) = self.refused.iter().position(|r| free(r) && r.args.is_some() && r.args.as_ref() == args) {
+        let grok = grok_gateway_call(tool, args);
+        // The arguments to compare with `r`'s when `r` is a refusal of this step's tool
+        let of = |r: &Refusal| {
+            if same_tool(&r.tool, tool) {
+                return Some(args);
+            }
+            match (r.called_as.as_deref(), grok) {
+                (Some(name), Some((called, called_args))) if name == called => Some(called_args),
+                _ => None,
+            }
+        };
+        let free = |r: &Refusal| r.call.as_ref().is_none_or(|c| !self.tools.contains_key(c));
+        let same_args = |r: &Refusal| of(r).is_some_and(|a| r.args.is_some() && r.args.as_ref() == a);
+        if let Some(k) = self.refused.iter().position(|r| free(r) && same_args(r)) {
             return Some(k);
         }
-        let alone = !self.tools.values().any(|&j| self.steps[j].tool.as_deref().is_some_and(|t| same_tool(t, tool)));
+        // Whether open step `j` may be a call of this step's tool: a grok call through the gateway
+        // by the name it was made under, or a `use_tool` whose target can't be read (29g)
+        let same_as = |j: usize| {
+            let Some(t) = self.steps[j].tool.as_deref() else {
+                return false;
+            };
+            match grok {
+                Some((called, _)) => match grok_gateway_call(t, self.open_args.get(&j)) {
+                    Some((other, _)) => other == called,
+                    None => t == GROK_USE_TOOL,
+                },
+                None => same_tool(t, tool),
+            }
+        };
+        let alone = !self.tools.values().any(|&j| same_as(j));
         if alone {
-            self.refused.iter().position(free)
+            self.refused.iter().position(|r| free(r) && of(r).is_some())
         } else {
             None
         }
@@ -690,6 +735,28 @@ fn same_tool(a: &str, b: &str) -> bool {
         routed(gateway).is_some_and(|rest| other.strip_prefix("mcp__") == Some(rest) || routed(other) == Some(rest))
     };
     a == b || stands_for(a, b) || stands_for(b, a)
+}
+
+/// grok's tool for calling an MCP tool (`{"tool_name": "<server>__<tool>", "tool_input": {…}}`).
+const GROK_USE_TOOL: &str = "use_tool";
+
+/// The gateway name and arguments of a grok step that called a tool through kwnt's gateway (29g),
+/// as grok 1.0.62 streams it: its own `use_tool` with `tool_name` `kwnt__<name>` and the call's
+/// arguments in `tool_input` (how grok offers MCP tools), or `kwnt__<name>` called directly with
+/// them. `<name>` is the grok name the gateway was called under (`github-create_or_update_file`).
+/// `None` for any other step, and for a `use_tool` that names its call only in a file.
+fn grok_gateway_call<'a>(tool: &'a str, args: Option<&'a Value>) -> Option<(&'a str, Option<&'a Value>)> {
+    let gateway_name = |name: &'a str| {
+        name.strip_prefix(crate::mcp::RESERVED_SERVER_NAME)
+            .and_then(|rest| rest.strip_prefix("__"))
+            .filter(|n| !n.is_empty())
+    };
+    if tool == GROK_USE_TOOL {
+        let args = args?;
+        let name = gateway_name(args.get("tool_name")?.as_str()?)?;
+        return Some((name, args.get("tool_input")));
+    }
+    gateway_name(tool).map(|name| (name, args))
 }
 
 /// Whether a tool (`browser_open`, `mcp__kwnt__browser_open`, …) opens a page in the bot's browser.
@@ -2156,6 +2223,152 @@ mod tests {
         ] {
             assert_eq!(same_tool(a, b), same, "same_tool({a}, {b})");
         }
+    }
+
+    /// 29g (Rigel's 29b QA): grok reaches kwnt's gateway under its own names
+    /// (`github-create_or_update_file`) with no id, and its step is `use_tool` with
+    /// `{"tool_name": "kwnt__<that name>", "tool_input": <the call's arguments>}` (or the
+    /// `kwnt__<name>` tool called directly), as a real grok 1.0.62 run streams it. The gate's note
+    /// carries the name the gateway was called under, so the held push still finds its own step.
+    #[test]
+    fn a_held_push_on_grok_finds_its_step_by_the_name_grok_called() {
+        const NOTED: &str = "mcp__github__create_or_update_file";
+        const GROK: &str = "github-create_or_update_file";
+        let gate = "kwant is checking this push of main before it goes (pre-push card pp1). Nothing was pushed.";
+        let own = "409 Conflict: README.md changed on the branch";
+        let other_args = json!({"owner": "o", "repo": "r", "branch": "lin-x", "path": "README.md"});
+        let held_args = json!({"owner": "o", "repo": "r", "branch": "main", "path": "src/lib.rs"});
+        // A grok step for gateway tool `name` with `args`, in each shape grok streams
+        let use_tool = |name: &str, args: &Value| ("use_tool".to_string(), json!({"tool_name": format!("kwnt__{name}"), "tool_input": args}));
+        let direct = |name: &str, args: &Value| (format!("kwnt__{name}"), args.clone());
+        type Shape<'a> = &'a dyn Fn(&str, &Value) -> (String, Value);
+        let shapes: [(&str, Shape); 2] = [("use_tool", &use_tool), ("direct", &direct)];
+        // The same step under `kwant__` instead of grok's server prefix `kwnt__`
+        let kwant_prefix = |(tool, args): (String, Value)| {
+            (tool.replace("kwnt__", "kwant__"), serde_json::from_str::<Value>(&args.to_string().replace("kwnt__", "kwant__")).unwrap())
+        };
+        let open = |log: &mut ActivityLog, id: &str, (tool, args): (String, Value)| {
+            log.observe(&pending(id, &tool, args));
+        };
+        let note = |log: &mut ActivityLog, called_as: &str, args: &Value| {
+            log.refused_call_as(NOTED, Some(called_as), None, Some(args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+        };
+        let failed = |id: &str, error: &str| RuntimeEvent::ToolCallCompleted {
+            id: id.into(),
+            result: json!({"status": "error", "error": error}),
+        };
+        let words_of = |log: &mut ActivityLog, ev: RuntimeEvent| {
+            let ended = log.observe(&ev);
+            (ended[0].status, ended[0].detail.clone().unwrap_or_default())
+        };
+        let own_reason = ("failed", own.to_string());
+        let blocked = ("failed", crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL.to_string());
+
+        for (shape, step) in shapes {
+            // (a) The one open step of that tool, a note with no id: the held push gets the words,
+            // by its arguments or as the only one open (grok's failed step says just "failed")
+            for shown in [held_args.clone(), json!({"path": "src/lib.rs"})] {
+                let mut log = ActivityLog::default();
+                open(&mut log, "held", step(GROK, &shown));
+                note(&mut log, GROK, &held_args);
+                assert_eq!(words_of(&mut log, failed("held", "failed")), blocked, "{shape}: the one open");
+            }
+
+            // (b) Two open, a note with no id and equal arguments: only the matching one gets the
+            // words, the other keeps its own 409, in both end orders
+            for held_first in [false, true] {
+                let mut log = ActivityLog::default();
+                open(&mut log, "other", step(GROK, &other_args));
+                open(&mut log, "held", step(GROK, &held_args));
+                note(&mut log, GROK, &held_args);
+                if held_first {
+                    assert_eq!(words_of(&mut log, failed("held", gate)), blocked, "{shape}: held ends first");
+                    assert_eq!(words_of(&mut log, failed("other", own)), own_reason, "{shape}: held ends first");
+                } else {
+                    assert_eq!(words_of(&mut log, failed("other", own)), own_reason, "{shape}: other ends first");
+                    assert_eq!(words_of(&mut log, failed("held", gate)), blocked, "{shape}: other ends first");
+                }
+            }
+
+            // Two open with shown arguments that don't match: never a guess between two
+            let mut log = ActivityLog::default();
+            open(&mut log, "other", step(GROK, &other_args));
+            open(&mut log, "held", step(GROK, &json!({"path": "src/lib.rs"})));
+            note(&mut log, GROK, &held_args);
+            assert_eq!(words_of(&mut log, failed("other", own)), own_reason, "{shape}: two open, no guess");
+            assert_eq!(words_of(&mut log, failed("held", gate)), blocked, "{shape}: the one left open");
+
+            // An open grok call of another tool isn't one of this tool: the held one is alone
+            let mut log = ActivityLog::default();
+            open(&mut log, "issue", step("github-create_issue", &other_args));
+            open(&mut log, "held", step(GROK, &json!({"path": "src/lib.rs"})));
+            note(&mut log, GROK, &held_args);
+            assert_eq!(words_of(&mut log, failed("held", gate)), blocked, "{shape}: another tool open");
+            assert_eq!(words_of(&mut log, failed("issue", own)), own_reason, "{shape}: another tool keeps its reason");
+
+            // (c) Each grok name is one tool: `-2` only matches its own step, even with equal
+            // arguments, in both end orders; the plain name's step keeps its own reason
+            for suffixed_first in [false, true] {
+                let mut log = ActivityLog::default();
+                open(&mut log, "plain", step(GROK, &held_args));
+                open(&mut log, "two", step("github-create_or_update_file-2", &held_args));
+                note(&mut log, "github-create_or_update_file-2", &held_args);
+                if suffixed_first {
+                    assert_eq!(words_of(&mut log, failed("two", gate)), blocked, "{shape}: -2 ends first");
+                    assert_eq!(words_of(&mut log, failed("plain", own)), own_reason, "{shape}: -2 ends first");
+                } else {
+                    assert_eq!(words_of(&mut log, failed("plain", own)), own_reason, "{shape}: plain ends first");
+                    assert_eq!(words_of(&mut log, failed("two", gate)), blocked, "{shape}: plain ends first");
+                }
+            }
+            // A grok step for another tool, alone, never takes the note; nor one called with only
+            // a prefix, nor the note's name without grok's server prefix
+            for (tool, args) in [
+                step("gitlab-create_or_update_file", &held_args),
+                kwant_prefix(step(GROK, &held_args)),
+            ] {
+                let mut log = ActivityLog::default();
+                open(&mut log, "x", (tool.clone(), args));
+                note(&mut log, GROK, &held_args);
+                assert_eq!(words_of(&mut log, failed("x", own)), own_reason, "{shape}: {tool} is not {GROK}");
+            }
+        }
+
+        // A bare grok name (no server prefix) and a `use_tool` naming its call only in a file
+        // are never taken for the held call; the file one also blocks a guess for another use_tool
+        for (tool, args) in [(GROK.to_string(), held_args.clone()), ("use_tool".to_string(), json!({"file": "/tmp/call.json"}))] {
+            let mut log = ActivityLog::default();
+            open(&mut log, "x", (tool.clone(), args));
+            note(&mut log, GROK, &held_args);
+            assert_eq!(words_of(&mut log, failed("x", own)), own_reason, "{tool} is not the held call");
+        }
+        let mut log = ActivityLog::default();
+        open(&mut log, "file", ("use_tool".to_string(), json!({"file": "/tmp/call.json"})));
+        open(&mut log, "held", use_tool(GROK, &json!({"path": "src/lib.rs"})));
+        note(&mut log, GROK, &held_args);
+        assert_eq!(words_of(&mut log, failed("held", gate)), ("failed", gate.to_string()), "a use_tool of unknown target is open: no guess");
+
+        // A note without the grok name (Codex's, Claude's) never matches a grok step, as before
+        let mut log = ActivityLog::default();
+        open(&mut log, "held", use_tool(GROK, &held_args));
+        log.refused_call(NOTED, None, Some(&held_args), crate::mcp::PREPUSH_BLOCKED_STEP_DETAIL);
+        assert_eq!(words_of(&mut log, failed("held", gate)), ("failed", gate.to_string()), "no grok name on the note");
+
+        // The step shapes themselves
+        assert_eq!(grok_gateway_call("use_tool", Some(&use_tool(GROK, &held_args).1)), Some((GROK, Some(&held_args))));
+        assert_eq!(grok_gateway_call("kwnt__github-create_or_update_file-2", Some(&held_args)), Some(("github-create_or_update_file-2", Some(&held_args))));
+        for (tool, args) in [
+            ("use_tool", json!({"file": "/tmp/call.json"})),
+            ("use_tool", json!({"tool_name": "github__create_issue", "tool_input": {}})),
+            ("use_tool", json!({"tool_name": "kwnt__", "tool_input": {}})),
+            ("kwnt__", json!({})),
+            ("kwnt_github-create_issue", json!({})),
+            ("mcp__kwnt__github__create_or_update_file", json!({})),
+            ("read_file", json!({"path": "a"})),
+        ] {
+            assert_eq!(grok_gateway_call(tool, Some(&args)), None, "{tool} {args}");
+        }
+        assert_eq!(grok_gateway_call("use_tool", None), None);
     }
 
     /// 28k: a denial whose card stopped waiting with no answer (it couldn't stay open, or it was

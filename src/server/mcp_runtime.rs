@@ -1684,10 +1684,12 @@ async fn gateway_rpc(
             let tool_name = tools
                 .canonical_name(naming, name)
                 .unwrap_or_else(|| name.to_string());
+            // 29g: grok sends no id; its step carries the grok name, which only this map can read
+            let called_as = (naming == GatewayNaming::Grok).then_some(name);
             // Dropping the call withdraws its card (or stops the forwarded call) when the turn ends
             let (caller, raw_arguments) = (session.caller(), arguments.to_string());
             let outcome = tokio::select! {
-                outcome = tools.call_step(&caller, &call_id, step_id, &tool_name, &raw_arguments) => outcome,
+                outcome = tools.call_step(&caller, &call_id, step_id, called_as, &tool_name, &raw_arguments) => outcome,
                 _ = session.ended.cancelled() => {
                     let (server, tool) = mcp::split_tool_name(&tool_name).unwrap_or(("", name));
                     session.ctx.record(cancelled_record(&call_id, &tool_name, server, tool, &arguments));
