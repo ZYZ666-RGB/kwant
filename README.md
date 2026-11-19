@@ -78,6 +78,7 @@ It's written in Rust (Tokio, Axum, SQLite) with a React web app embedded in the 
 - **New in 0.9.27.** **Deny can now say why**: tap **Say why** on an approval card, type what the bot should do instead, and it hears it right away.
 - **New in 0.9.28.** **A runaway command can't take kwant down**: on Linux, when memory runs out, the system stops the bot's command or AI CLI, not kwant, and kwant says why. **Your reason for Deny shows in Details**, with the step it stopped.
 - **New in 0.9.29.** **An approval asks once**: while a bot's approval card is on screen, the "needs you" bar above the message box steps aside instead of repeating it.
+- **New in 0.9.30.** **Details shows the effort**: a reply made through a CLI no longer shows its "Executed via … CLI" line as reasoning; Details' Ran on row ends with the effort instead.
 
 0.8 added bots that show their work, approvals off reaching every engine, drag and drop into any chat, import from more places, fresh-eyes reviews with the pre-push card, and Claude kept away from your secrets on a Mac. Every change is in the [CHANGELOG](CHANGELOG.md).
 
