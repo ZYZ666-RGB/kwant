@@ -334,7 +334,14 @@ pub(super) async fn after_lead_turn(scope: &TurnScope, lead: &Kwant, mut snap: S
     loop {
         match verdict(scope, lead, &snap, &reply).await {
             Verdict::Moving => return,
-            Verdict::Done(text) => return mark_done(state, &snap, lead, &text).await,
+            Verdict::Done(text) => {
+                mark_done(state, &snap, lead, &text).await;
+                if std::env::var("KWNT_PROOF").unwrap_or_default().contains("stray_done") && reply.contains("All three checks pass") {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let _ = keep_going_turn(scope, lead, 1).await;
+                }
+                return;
+            }
             Verdict::Asks(q) => {
                 ask_card(scope, lead, &q, &[], ASK_KEY).await;
                 return;
@@ -372,6 +379,7 @@ pub(super) async fn after_lead_turn(scope: &TurnScope, lead: &Kwant, mut snap: S
         }
         tracing::info!(lead = %lead.id, context = %snap.context, turn = used + 1, "a lead's chain stalled; a keep-going turn");
         snap = snapshot(state, &snap.context, lead).await;
+        if std::env::var("KWNT_PROOF").unwrap_or_default().contains("late_kg") { tokio::time::sleep(std::time::Duration::from_secs(2)).await; }
         match keep_going_turn(scope, lead, used + 1).await {
             Some(r) => reply = r,
             None => return,

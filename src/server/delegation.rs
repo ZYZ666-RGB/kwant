@@ -1195,6 +1195,7 @@ async fn continue_lead(state: &AppState, d: &Delegation, batch: &[Delegation], o
     opts.beside_running = beside_running;
     let context = d.origin_context().unwrap_or(&lead.id).to_string();
     let before = super::keep_going::snapshot(state, &context, &lead).await;
+    if std::env::var("KWNT_PROOF").unwrap_or_default().contains("late_res") { tokio::time::sleep(std::time::Duration::from_secs(2)).await; }
     let outcome = try_kwant_turn(&scope, &lead, prompt, opts).await;
     // The cards of the batch are reviewed in a turn of their own that sees only each brief and
     // result (fresh eyes), then the ones still waiting get one reminder (a failed turn counts too)
