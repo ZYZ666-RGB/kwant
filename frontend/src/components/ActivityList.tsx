@@ -10,7 +10,9 @@ import {
   shownStepCount,
   foldAnswers,
   formatDuration,
+  isFileStep,
   isOpenStep,
+  pathBreakParts,
   plainTitle,
   shownStatus,
   statusLabel,
@@ -215,8 +217,11 @@ const StepRow: React.FC<{ step: ActivityStep; live?: LiveActivity; now: number; 
       className={`px-3 py-1.5 text-xs focus:outline-none focus-visible:bg-zinc-800/60 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-sky-400 ${waiting ? 'bg-amber-500/[0.06]' : ''}`}
     >
       {step.detail ? (
+        // 29e: on a touch phone the 44 px summary takes in the li's py-1.5 (-my-1.5 py-1.5), so a row with › is 44 px
+        // like the rows without, not 56, and its tap area stays 44 px. 29i: there its ring sits inside (-outline-offset-2,
+        // like the li's), so the list's overflow-hidden doesn't clip it and it doesn't cross an open row's output.
         <details className="group" open={opened || undefined}>
-          <summary className="flex items-start [@media(max-width:767px)_and_(pointer:coarse)]:items-center gap-2 cursor-pointer list-none rounded [&::-webkit-details-marker]:hidden focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400">
+          <summary className="flex items-start [@media(max-width:767px)_and_(pointer:coarse)]:items-center [@media(max-width:767px)_and_(pointer:coarse)]:-my-1.5 [@media(max-width:767px)_and_(pointer:coarse)]:py-1.5 gap-2 cursor-pointer list-none rounded [&::-webkit-details-marker]:hidden focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400 [@media(max-width:767px)_and_(pointer:coarse)]:focus-visible:-outline-offset-2">
             {head}
             <ChevronRight size={13} className="mt-px flex-shrink-0 text-zinc-400 transition-transform motion-reduce:transition-none group-open:rotate-90" aria-hidden="true" />
           </summary>
@@ -226,7 +231,7 @@ const StepRow: React.FC<{ step: ActivityStep; live?: LiveActivity; now: number; 
               step.status === 'declined' ? 'font-sans text-xs' : 'font-mono text-[11px]'
             } ${step.status === 'failed' ? 'text-rose-200 bg-rose-950/30 border-rose-500/20' : 'text-zinc-300 bg-zinc-950/80 border-zinc-800'}`}
           >
-            {step.detail}
+            <StepDetail text={step.detail} path={isFileStep(step)} />
           </pre>
         </details>
       ) : (
@@ -234,6 +239,16 @@ const StepRow: React.FC<{ step: ActivityStep; live?: LiveActivity; now: number; 
       )}
     </li>
   );
+};
+
+/**
+ * 29i: a path detail may break after each "/" (<wbr>), so the file name stays whole; any other detail is plain text.
+ * 29l: only a file step's detail (`path`) is read as a path; a command that starts with one renders as before 29i.
+ */
+const StepDetail: React.FC<{ text: string; path: boolean }> = ({ text, path }) => {
+  const parts = path ? pathBreakParts(text) : null;
+  if (!parts) return <>{text}</>;
+  return <>{parts.map((p, i) => <React.Fragment key={i}>{i > 0 && <wbr />}{p}</React.Fragment>)}</>;
 };
 
 const Steps: React.FC<{ steps: ActivityStep[]; live?: LiveActivity; dropped?: number; id: string; openStep?: string | null }> = ({ steps, live, dropped = 0, id, openStep = null }) => {
@@ -343,10 +358,10 @@ export const LiveActivityList: React.FC<{ live: LiveActivity; idBase: string; co
       <section aria-label="What the bot is doing" data-steps-folded="" className="mt-2 max-w-full">
         <div className="flex max-w-full min-w-0 items-center gap-2">
           <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-controls={open ? listId : undefined} className={STEPS_ROW_BUTTON}>
-            <ListTree size={13} className="flex-shrink-0 max-sm:mt-[1.5px] text-sky-400/80" aria-hidden="true" />
+            <ListTree size={13} className="flex-shrink-0 text-sky-400/80" aria-hidden="true" />
             {/* No time while running, as in the card */}
             <span className="truncate min-w-0">Working · {work} {work === 1 ? 'step' : 'steps'}</span>
-            <ChevronRight size={13} className={`flex-shrink-0 max-sm:mt-[1.5px] text-zinc-400 transition-transform motion-reduce:transition-none ${open ? 'rotate-90' : ''}`} aria-hidden="true" />
+            <ChevronRight size={13} className={`flex-shrink-0 text-zinc-400 transition-transform motion-reduce:transition-none ${open ? 'rotate-90' : ''}`} aria-hidden="true" />
           </button>
           {lead && <div className="min-w-0 shrink">{lead}</div>}
         </div>
