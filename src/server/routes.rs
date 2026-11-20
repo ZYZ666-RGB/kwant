@@ -6149,6 +6149,9 @@ pub enum PageRefusal {
     PagesFull,
     /// VM mode: the browser is there but didn't answer in time (overloaded). Temporary.
     Busy,
+    /// The browser holds as many pages as its process limit allows and every one is held or in
+    /// use (31b, [`super::browser_pages::PAGE_PID_BUDGET`]).
+    BrowserFull,
 }
 
 /// The page's controller for a bot's browser call: like [`get_or_create_browser_controller`],
@@ -6208,11 +6211,18 @@ pub(crate) fn page_refused(state: &AppState, refusal: PageRefusal) -> (StatusCod
             "code": PAGES_FULL,
             "is_running": true,
         }))),
+        PageRefusal::BrowserFull => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({
+            "error": super::browser_pages::browser_full_message(),
+            "code": BROWSER_FULL,
+            "is_running": true,
+        }))),
     }
 }
 
 /// The `code` of a call refused because every job page of the team is in use.
 pub const PAGES_FULL: &str = "PAGES_FULL";
+/// The `code` of a call refused because the browser is full (31b).
+pub const BROWSER_FULL: &str = "BROWSER_FULL";
 
 /// Opens (or returns) a page's controller. A job page that isn't open yet is made room for and
 /// opened under its team's lock, so two jobs opening at once never pass the cap; with no room it

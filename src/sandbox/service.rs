@@ -10,6 +10,11 @@ use serde_json::json;
 use std::{collections::HashMap, path::{Path, PathBuf}, time::Duration};
 use tokio::{process::Command, sync::Mutex, time::{sleep, timeout}};
 
+/// The `--pids-limit` of kwant's own browser container ([`managed_run_args`]): processes and
+/// threads together. Chrome and its DevTools proxy can't fork past it, so the browser's pages are
+/// kept under a budget derived from it (31b, [`crate::server::browser_pages::PAGE_PID_BUDGET`]).
+pub const BROWSER_PIDS_LIMIT: u64 = 512;
+
 /// The VM browser's image. Bump it whenever `docker/browser.Dockerfile` or
 /// `docker/browser-entrypoint.sh` change: kwant builds an image only when its tag is missing, and
 /// replaces a browser container made from another tag, so the bump is what ships the change.
