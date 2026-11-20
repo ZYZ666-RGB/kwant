@@ -1,0 +1,107 @@
+# THROWAWAY (30w): proves the Get-Tree pid-reuse guard. Never merged; lives only on lin-scratch-30w-tree-demo.
+name: scratch 30w tree demo
+on:
+  push:
+    branches: [lin-scratch-30w-tree-demo]
+permissions:
+  contents: read
+jobs:
+  demo:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Get-Tree old (main) vs new (PR #901) on an orphan whose parent pid is taken by a newer process
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The real function text, cut from each workflow file (not retyped)
+          function Get-Fn([string]$rev, [string]$file, [string]$newName, [switch]$Snapshot) {
+            $lines = (git show "${rev}:$file") -split "`n"
+            $start = ($lines | Select-String -Pattern '^\s+function Get-Tree\(' | Select-Object -First 1).LineNumber - 1
+            $end = $start; while ($lines[$end] -notmatch '^          }\s*$') { $end++ }
+            $text = ($lines[$start..$end] -join "`n") -replace 'function Get-Tree\(', "function $newName("
+            if ($Snapshot) { $text = $text -replace '\$all = [^\n]*Get-CimInstance Win32_Process[^\n]*', '$all = @($script:snapshot)' }
+            $text
+          }
+          $defs = @()
+          foreach ($s in @($false, $true)) {
+            $sfx = if ($s) { 'Snap' } else { '' }
+            $defs += Get-Fn origin/main .github/workflows/windows.yml "Get-TreeOld$sfx" -Snapshot:$s
+            $defs += Get-Fn HEAD .github/workflows/windows.yml "Get-TreeNew$sfx" -Snapshot:$s
+            $defs += Get-Fn origin/main .github/workflows/packaging.yml "Get-PkgOld$sfx" -Snapshot:$s
+            $defs += Get-Fn HEAD .github/workflows/packaging.yml "Get-PkgNew$sfx" -Snapshot:$s
+          }
+          "----- functions under test -----"; $defs[0..3]
+          . ([scriptblock]::Create($defs -join "`n"))
+          $created = @{ n = 'CreationDate'; e = { '{0:yyyy-MM-dd HH:mm:ss.ffffff}' -f $_.CreationDate } }
+          function Show([string]$label, $rows) { "$label -> $(@($rows).Count) process(es)"; @($rows) | Format-Table ProcessId, ParentProcessId, Name, $created | Out-String -Width 200 }
+
+          # 1. A parent that starts a lingering child (ping, 5 min) and exits: the child is an orphan whose
+          #    ParentProcessId names a dead process, like vctip.exe after link.exe
+          $parent = Start-Process pwsh -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-Command',
+            "Start-Process ping.exe -ArgumentList '-n','300','127.0.0.1' -WindowStyle Hidden; Start-Sleep 1")
+          $parent.WaitForExit(); $deadPid = $parent.Id; $parent.Dispose()
+          $orphan = Get-CimInstance Win32_Process -Filter "ParentProcessId = $deadPid AND Name = 'ping.exe'"
+          if (-not $orphan) { Write-Error "no orphan ping.exe under dead pid $deadPid"; exit 1 }
+          "orphan: pid $($orphan.ProcessId), ParentProcessId $deadPid (exited), created $($orphan.CreationDate.ToString('HH:mm:ss.ffffff'))"
+
+          # 2. Positive control: a live parent's real child is still counted by the new functions
+          $live = Start-Process pwsh -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-Command',
+            "Start-Process ping.exe -ArgumentList '-n','60','127.0.0.1' -WindowStyle Hidden; Start-Sleep 60")
+          Start-Sleep 4
+          Show "control: Get-Tree NEW on live parent $($live.Id)" (Get-TreeNew $live.Id)
+          Show "control: packaging Get-Tree NEW on live parent $($live.Id)" (Get-PkgNew $live.Id)
+          $ctlNew = @(Get-TreeNew $live.Id | Where-Object Name -eq 'ping.exe').Count
+          $ctlPkg = @(Get-PkgNew $live.Id | Where-Object Name -eq 'ping.exe').Count
+
+          # 3. Stand-in for pid reuse: the live process list plus a newer "kwnt.exe" holding the dead pid
+          $script:snapshot = @(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $deadPid } |
+            Select-Object ProcessId, ParentProcessId, Name, CreationDate)
+          $script:snapshot += [pscustomobject]@{ ProcessId = $deadPid; ParentProcessId = $PID; Name = 'kwnt.exe (stand-in, newer)'; CreationDate = Get-Date }
+          $so = @(Get-TreeOldSnap $deadPid); $sn = @(Get-TreeNewSnap $deadPid); $po = @(Get-PkgOldSnap $deadPid); $pn = @(Get-PkgNewSnap $deadPid)
+          Show "stand-in: windows.yml Get-Tree OLD" $so
+          Show "stand-in: windows.yml Get-Tree NEW" $sn
+          "not counted by NEW:"; $script:olderThanParent | Format-Table ProcessId, ParentProcessId, Name, $created | Out-String -Width 200
+          Show "stand-in: packaging.yml Get-Tree OLD" $po
+          Show "stand-in: packaging.yml Get-Tree NEW" $pn
+
+          # 4. Real pid reuse, if Windows hands the dead pid out again within 4 minutes
+          $reused = $null; $tries = 0; $deadline = (Get-Date).AddMinutes(4)
+          while (-not $reused -and (Get-Date) -lt $deadline) {
+            $psi = [System.Diagnostics.ProcessStartInfo]::new('ping.exe', '-n 120 127.0.0.1')
+            $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true
+            $p = [System.Diagnostics.Process]::Start($psi); $tries++
+            if ($p.Id -eq $deadPid) { $reused = $p } else { $p.Kill(); $p.WaitForExit(); $p.Dispose() }
+          }
+          $ro = $null; $rn = $null
+          if ($reused) {
+            "REAL REUSE after $tries starts: new ping.exe got pid $deadPid"
+            $ro = @(Get-TreeOld $deadPid); $rn = @(Get-TreeNew $deadPid)
+            Show "real reuse: windows.yml Get-Tree OLD" $ro
+            Show "real reuse: windows.yml Get-Tree NEW" $rn
+            Show "real reuse: packaging.yml Get-Tree OLD" (Get-PkgOld $deadPid)
+            Show "real reuse: packaging.yml Get-Tree NEW" (Get-PkgNew $deadPid)
+            $reused.Kill()
+          } else { "no real reuse of pid $deadPid in $tries starts over 4 minutes (stand-in result above stands alone)" }
+
+          Stop-Process -Id $orphan.ProcessId -Force -ErrorAction SilentlyContinue
+          $o = [int]$orphan.ProcessId
+          $verdict = [ordered]@{
+            'control NEW counts the live child' = $ctlNew -ge 1
+            'control packaging NEW counts the live child' = $ctlPkg -ge 1
+            'stand-in OLD counts the orphan' = [bool]($so | Where-Object { [int]$_.ProcessId -eq $o })
+            'stand-in NEW leaves the orphan out' = -not ($sn | Where-Object { [int]$_.ProcessId -eq $o })
+            'stand-in NEW lists it as not counted' = [bool]($script:olderThanParent | Where-Object { [int]$_.ProcessId -eq $o })
+            'stand-in packaging OLD counts the orphan' = [bool]($po | Where-Object { [int]$_.ProcessId -eq $o })
+            'stand-in packaging NEW leaves the orphan out' = -not ($pn | Where-Object { [int]$_.ProcessId -eq $o })
+          }
+          if ($reused) {
+            $verdict['real reuse OLD counts the orphan'] = [bool]($ro | Where-Object { [int]$_.ProcessId -eq $o })
+            $verdict['real reuse NEW leaves the orphan out'] = -not ($rn | Where-Object { [int]$_.ProcessId -eq $o })
+          }
+          "----- verdict -----"; $verdict.GetEnumerator() | ForEach-Object { "{0,-48} {1}" -f $_.Key, $(if ($_.Value) { 'PASS' } else { 'FAIL' }) }
+          if ($verdict.Values -contains $false) { Write-Error "guard demo failed"; exit 1 }
+          "GUARD DEMO: PASS"
