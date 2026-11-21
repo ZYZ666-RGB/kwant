@@ -2612,6 +2612,13 @@ pub(super) async fn turn_once(
     if let Ok(text) = &reply {
         ended.reply = Some(text.as_str().into());
     }
+    // 33e: a turn parked behind a usage limit (or held for the bot's budget) retries by itself, and
+    // its chat says when; "stopped… retry" would ask the person for nothing (as the Needs-you item,
+    // which skips `resumes_itself`)
+    if ended.outcome == "failed" && !ended.silent_failure {
+        let waiting = scope.state.db.parked_waiting_in(&target_kwant.id, scope.channel_id.as_deref(), scope.thread_id.as_deref()).await;
+        ended.silent_failure = waiting.unwrap_or(false);
+    }
     // The save step asked for the delivery continuation: it starts on this turn's chat slot
     let continues = next.is_some_and(|n| n.lock().is_ok_and(|n| n.is_some()));
     if let (true, false, Some(h)) = (continues && slot.holds_chat(), scope.cancel_token.is_cancelled(), handover) {

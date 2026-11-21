@@ -13,7 +13,7 @@ use axum::{
 use kwnt::{
     broker::PermissionBroker,
     config::Config,
-    db::{threads::NewDelegation, Database},
+    db::{parked::NewParkedTurn, threads::NewDelegation, Database},
     drivers::events::RuntimeEvent,
     router::LayaRouter,
     server::{continuity, create_router, AppState},
@@ -25,8 +25,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tower::ServiceExt;
 
-/// `CRASH` dies with no output (a model that stopped without an answer); `BLOCKED` and `DONE` end
-/// with that line; anything else is a plain answer.
+/// `CRASH` dies with no output (a model that stopped without an answer); `BLOCKED`, `KEYED` (a
+/// Blocked line naming a key) and `DONE` end with that line; anything else is a plain answer.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 case "$1" in
   auth) echo '{"loggedIn":true}'; exit 0 ;;
@@ -35,6 +35,7 @@ for a; do last="$a"; done
 case "$last" in
   *CRASH*) exit 3 ;;
   *BLOCKED*) printf '%s\n' '{"type":"result","is_error":false,"num_turns":1,"result":"I looked for the backup.\n\nBlocked: the backup drive isn't mounted. Plug it in and tell me to try again."}' ;;
+  *KEYED*) printf '%s\n' '{"type":"result","is_error":false,"num_turns":1,"result":"GitHub said no.\n\nBlocked: GitHub refused ghp_abcdefghijklmnop1234 so paste a new token in Settings."}' ;;
   *DONE*) printf '%s\n' '{"type":"result","is_error":false,"num_turns":1,"result":"Here is the plan.\n\nDone: 3-day plan saved, with the museum on day 2."}' ;;
   *) printf '%s\n' '{"type":"result","is_error":false,"num_turns":1,"result":"answer"}' ;;
 esac
@@ -189,6 +190,50 @@ async fn a_failed_turn_says_the_bot_stopped() {
     assert!(notes.iter().all(|n| n.kind != "turn_finished"), "{notes:?}");
 }
 
+/// A turn parked behind a usage limit retries by itself at the reset, and its chat says when:
+/// "stopped… Open kwant bots to retry" would ask the person for nothing (Rigel, 33e QA).
+#[tokio::test]
+async fn a_turn_waiting_for_its_limit_retry_sends_no_stop() {
+    let mut env = setup().await;
+    let kid = env.kwant_id("Researcher").await;
+    let parked = env
+        .state
+        .db
+        .park_turn(&NewParkedTurn {
+            kwant_id: kid.clone(),
+            channel_id: None,
+            direct_kwant_id: Some(kid.clone()),
+            thread_id: None,
+            delegation_id: None,
+            depth: 0,
+            prompt: "find the flights".into(),
+            retry_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            reason: "usage_limit",
+        })
+        .await
+        .unwrap();
+    assert!(parked.is_some());
+    env.say_to("Researcher", "CRASH please find the flights").await;
+    // Its turn ends failed; every notification up to then is kept
+    let mut notes = Vec::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            match env.rx.recv().await.map(|e| e.unscoped().clone()) {
+                Ok(RuntimeEvent::TurnEnded { kwant_id, outcome, .. }) if kwant_id == kid => {
+                    assert_eq!(outcome, "failed");
+                    break;
+                }
+                Ok(RuntimeEvent::Notify { kind, title, body, .. }) => notes.push(Note { kind, title, body }),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the turn ends");
+    notes.extend(env.notes_before_marker(&env.kwant_id("Writer").await).await);
+    assert!(notes.iter().all(|n| n.kind != "turn_stopped"), "{notes:?}");
+}
+
 #[tokio::test]
 async fn a_blocked_reply_says_the_bot_is_blocked() {
     let mut env = setup().await;
@@ -205,6 +250,18 @@ async fn a_blocked_reply_says_the_bot_is_blocked() {
     let rest = env.notes_before_marker(&env.kwant_id("Researcher").await).await;
     assert!(rest.is_empty(), "{rest:?}");
     assert!(notes.iter().all(|n| n.kind != "turn_finished" && !n.title.contains("replied")), "{notes:?}");
+}
+
+/// The Blocked line leaves kwant (push, webhook, Telegram): a key in it is masked.
+#[tokio::test]
+async fn a_key_in_a_blocked_line_is_masked() {
+    let mut env = setup().await;
+    env.say_to("Writer", "KEYED open the pull request").await;
+    let note = env.notes_until("turn_stopped").await.pop().unwrap();
+    assert_eq!(note.title, "Writer is blocked");
+    assert!(note.body.starts_with("Blocked: GitHub refused "), "{note:?}");
+    assert!(!note.body.contains("ghp_"), "{note:?}");
+    assert!(note.body.contains("••••••••") && note.body.ends_with("paste a new token in Settings."), "{note:?}");
 }
 
 #[tokio::test]
