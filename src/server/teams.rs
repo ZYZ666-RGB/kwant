@@ -375,7 +375,7 @@ fn template_plan(t: &Template, req: &Map<String, Value>, key: Option<String>, tz
         .iter()
         .filter_map(|b| chosen.get(b.slot()).filter(|n| **n != b.name).map(|n| (b.name.clone(), n.clone())))
         .collect();
-    let new_handle = (handle != t.handle).then(|| (t.handle.as_str(), handle.as_str()));
+    let new_handle = (handle != t.handle).then_some((t.handle.as_str(), handle.as_str()));
     let rn = |text: &str| rename_text(text, &renames, new_handle);
     let bots = t
         .bots
