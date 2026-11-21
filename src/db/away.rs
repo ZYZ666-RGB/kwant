@@ -447,6 +447,14 @@ const CHAT_COLUMNS: [&str; 3] = ["channel_id", "direct_kwant_id", "thread_id"];
 const ROUTINE_RUN_RESULT: &str =
     "SELECT r.message_id, rt.instructions, r.routine_id, r.trigger FROM routine_runs r JOIN routines rt ON rt.id = r.routine_id WHERE r.id = ?";
 
+/// `messages.created_at` is SQLite's `CURRENT_TIMESTAMP` text (`2026-11-21 19:02:20`), while sqlx
+/// writes a bound `DateTime` as `2026-11-21T19:02:20…`: as `' ' < 'T'`, every message of that day
+/// compared before it (33d). Bound in the column's own format (as `db/auditor.rs` does), the
+/// comparison is right and still uses the `(chat, created_at)` indexes.
+fn message_time(t: DateTime<Utc>) -> String {
+    t.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 /// `?` = chat id, at.
 fn person_before_sql(col: &str) -> String {
     format!("SELECT * FROM messages WHERE {col} = ? AND created_at <= ? AND sender_role = 'user' ORDER BY created_at DESC, rowid DESC LIMIT 1")
@@ -483,7 +491,7 @@ impl Database {
     /// keeps the ones whose lead is in its space).
     pub async fn done_replies(&self, since: DateTime<Utc>, limit: i64) -> Result<Vec<DoneReplyRow>, DbError> {
         Ok(sqlx::query_as(&format!("{DONE_REPLIES} ORDER BY created_at DESC, rowid DESC LIMIT ?2"))
-            .bind(since)
+            .bind(message_time(since))
             .bind(limit)
             .fetch_all(&self.pool)
             .await?)
@@ -516,7 +524,7 @@ impl Database {
         for col in CHAT_COLUMNS {
             let row = sqlx::query_as::<_, Message>(&person_before_sql(col))
             .bind(context)
-            .bind(at)
+            .bind(message_time(at))
             .fetch_optional(&self.pool)
             .await?;
             if row.is_some() {
@@ -540,8 +548,8 @@ impl Database {
             let after = sqlx::query_as::<_, Message>(&task_reply_after_sql(col))
             .bind(context)
             .bind(bot_name)
-            .bind(review_at)
-            .bind(review_at + slack)
+            .bind(message_time(review_at))
+            .bind(message_time(review_at + slack))
             .fetch_optional(&self.pool)
             .await?;
             if after.is_some() {
@@ -550,7 +558,7 @@ impl Database {
             let before = sqlx::query_as::<_, Message>(&task_reply_before_sql(col))
             .bind(context)
             .bind(bot_name)
-            .bind(review_at)
+            .bind(message_time(review_at))
             .fetch_optional(&self.pool)
             .await?;
             if before.is_some() {
