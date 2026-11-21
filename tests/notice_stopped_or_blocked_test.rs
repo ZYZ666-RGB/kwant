@@ -13,7 +13,7 @@ use axum::{
 use kwnt::{
     broker::PermissionBroker,
     config::Config,
-    db::{parked::NewParkedTurn, threads::NewDelegation, Database},
+    db::{parked::NewParkedTurn, spaces::SpaceId, threads::NewDelegation, Database},
     drivers::events::RuntimeEvent,
     router::LayaRouter,
     server::{continuity, create_router, AppState},
@@ -109,10 +109,19 @@ async fn setup() -> Env {
         LayaRouter::new(config.laya_url.clone()),
     );
     let app = create_router(state.clone());
+    // A fresh install is seeded with @helpers (Assistant, Researcher, Writer): they go (Assistant
+    // last, as a space keeps one bot), so the two made here are the only bots, on the fake claude
+    let seeded = state.db.list_kwants(&SpaceId::default_space()).await.unwrap();
+    for k in seeded.iter().filter(|k| k.name != "Assistant") {
+        ok(&app, "DELETE", &format!("/api/kwants/{}", k.id), None).await;
+    }
     for name in ["Researcher", "Writer"] {
         let bot = json!({"name": name, "title": format!("{name} the tester"), "persona_prompt": "Test persona",
             "avatar_sprite": "s", "driver_type": "cli", "preferred_model": "claude"});
         ok(&app, "POST", "/api/kwants", Some(bot)).await;
+    }
+    for k in seeded.iter().filter(|k| k.name == "Assistant") {
+        ok(&app, "DELETE", &format!("/api/kwants/{}", k.id), None).await;
     }
     let rx = state.event_sender.subscribe();
     let notifier = continuity::spawn_notifier(state.clone());
