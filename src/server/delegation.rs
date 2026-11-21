@@ -1047,6 +1047,14 @@ fn stop_reviews(batch: &[Delegation]) {
     stopped.extend(batch.iter().map(|b| b.id.clone()));
 }
 
+/// Test hook: forgets the in-memory [`STOPPED_REVIEWS`], as a server restart does (32o).
+#[doc(hidden)]
+pub fn forget_stopped_reviews() {
+    if let Some(stopped) = STOPPED_REVIEWS.get() {
+        stopped.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
 /// Whether the person stopped the lead's turn on hand-off `id`'s result (see [`STOPPED_REVIEWS`]).
 pub fn review_stopped(id: &str) -> bool {
     STOPPED_REVIEWS.get().is_some_and(|s| s.lock().unwrap_or_else(|e| e.into_inner()).contains(id))
