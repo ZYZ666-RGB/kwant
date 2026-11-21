@@ -268,9 +268,9 @@ async fn a_key_in_a_blocked_line_is_masked() {
     env.say_to("Writer", "KEYED open the pull request").await;
     let note = env.notes_until("turn_stopped").await.pop().unwrap();
     assert_eq!(note.title, "Writer is blocked");
-    assert!(note.body.starts_with("Blocked: GitHub refused "), "{note:?}");
     assert!(!note.body.contains("ghp_"), "{note:?}");
-    assert!(note.body.contains("••••••••") && note.body.ends_with("paste a new token in Settings."), "{note:?}");
+    // Masked by `missions::autofix::redact`, which writes `[redacted]` (impl.md, privacy note)
+    assert_eq!(note.body, "Blocked: GitHub refused [redacted] so paste a new token in Settings.");
 }
 
 #[tokio::test]
