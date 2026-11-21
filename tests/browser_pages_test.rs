@@ -596,6 +596,39 @@ async fn finished_jobs_dont_leave_their_browser_connections_behind() {
     );
 }
 
+/// 31z: a page closed while its job still holds its controller (as the #753 repro above does,
+/// and a bot's call in flight would) lets go of every connection once the job lets go of it. The
+/// browser ends the page's own connections at once; its download task then went back to retrying
+/// the closed page every 3 s forever, never seeing its job gone, and its copy of the controller
+/// kept the popups watcher's browser connection open with it: one connection and one task left
+/// behind for good, the 14-for-10 flake in CI.
+#[tokio::test]
+async fn a_page_closed_while_its_job_holds_it_drops_its_connections_once_the_job_lets_go() {
+    let tmp = tempdir().unwrap();
+    let Some((endpoint, _chrome)) = start_chrome(&tmp.path().join("chrome")).await else { return };
+    let port: u16 = endpoint.rsplit(':').next().unwrap().parse().unwrap();
+    let state = container_state(&tmp, endpoint).await;
+    let team = first_bot(&state).await.id;
+    let base = serve().await;
+    get_or_create_browser_controller(&state, &team).await.expect("the team page opens");
+    let before = settled_connections(port).await;
+
+    let ctrl = open_page(&state, &team, "c").await.expect("a job page opens");
+    ctrl.navigate(&format!("{base}/plain")).await.unwrap();
+    assert_eq!(title_becomes(&ctrl, "plain").await, "plain");
+    browser_pages::close_page(&state, &job_page_key(&team, "k", "c").unwrap()).await;
+    // The browser closes the page's own two connections (its DevTools and download ones) while
+    // the job still holds it; only the popups watcher's browser connection is left
+    let closing = connections_drop_to(port, before + 2).await;
+    assert!(closing <= before + 2, "the closed page's own connections stay open: {closing}, started with {before}");
+    // and the download task sees its connection end before the job lets go
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    drop(ctrl);
+    let after = connections_drop_to(port, before).await;
+    assert!(after <= before, "a closed page left {after} connections behind after its job let go, started with {before}");
+}
+
 /// An idle page's connections close; one that's watched (a live view open on it) or held (a step
 /// open for the person) never does, even past the same idle time.
 #[tokio::test]
