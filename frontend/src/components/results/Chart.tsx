@@ -4,6 +4,7 @@ import type { RendererProps } from './registry';
 import { ReplyText } from './ReplyText';
 
 const MAX_VALUE = 1e15;
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /** 1-4 series (unique by key) and 3-60 points, each with one cell/value per series (plan §A.3). */
 export function validChart(raw: unknown): ChartBlock | null {
@@ -162,7 +163,15 @@ export const Chart: React.FC<RendererProps<ChartBlock>> = ({ block }) => {
   // Bars: every category is named when its band fits a shortened label (5 bars at 390 px do); lines thin out.
   const MIN_BAND_LABEL = 28;
   const labelEvery = isBar ? Math.max(1, Math.ceil(MIN_BAND_LABEL / xStep)) : Math.max(1, Math.ceil(n / (narrow ? 4 : 10)));
+  const lastX = n - 1;
+  const gapX = lastX % labelEvery;
+  const showLastX = gapX === 0 || gapX * 2 >= labelEvery;
   const labelChars = isBar ? Math.max(3, Math.floor((xStep * labelEvery - 4) / 6)) : 10;
+  // A phone line chart whose dates all fall in one year prints "09-07", not "2026-09-07": the repeated year is what
+  // packed the labels edge to edge. Only the axis text changes; the tooltip, table and accessible names keep the year.
+  const year = block.points[0]?.x.slice(0, 4);
+  const dropYear = !isBar && narrow && block.points.every((p) => ISO_DAY.test(p.x) && p.x.startsWith(year));
+  const axisText = (x: string) => (dropYear ? x.slice(5) : x);
 
   const activePoint = active ? block.points[active.pointIdx] : null;
   const activeSeries = active ? block.series[active.seriesIdx] : null;
@@ -238,10 +247,10 @@ export const Chart: React.FC<RendererProps<ChartBlock>> = ({ block }) => {
             <line x1={PAD.left} x2={PAD.left} y1={PAD.top} y2={HEIGHT - PAD.bottom} className="stroke-zinc-700" strokeWidth={1} />
             <line x1={PAD.left} x2={WIDTH - PAD.right} y1={HEIGHT - PAD.bottom} y2={HEIGHT - PAD.bottom} className="stroke-zinc-700" strokeWidth={1} />
 
-            {/* X labels, thinned out so 390 px never clips. */}
+            {/* X labels, thinned out so 390 px never clips. The last point is labelled when it sits at least half a
+                step off the cadence; the regular label just before it then goes, so the two never overlap. */}
             {block.points.map((p, i) => {
-              const gap = (n - 1) % labelEvery;
-              if (i % labelEvery !== 0 && !(i === n - 1 && gap * 2 >= labelEvery)) return null;
+              if (i === lastX ? !showLastX : i % labelEvery !== 0 || (gapX > 0 && showLastX && i === lastX - gapX)) return null;
               return (
                 <text
                   key={p.id}
@@ -251,13 +260,13 @@ export const Chart: React.FC<RendererProps<ChartBlock>> = ({ block }) => {
                   fontSize={11}
                   className="fill-zinc-400"
                 >
-                  {p.x.length > labelChars ? (
+                  {axisText(p.x).length > labelChars ? (
                     <>
                       <title>{p.x}</title>
-                      {`${p.x.slice(0, labelChars - 1)}…`}
+                      {`${axisText(p.x).slice(0, labelChars - 1)}…`}
                     </>
                   ) : (
-                    p.x
+                    axisText(p.x)
                   )}
                 </text>
               );
