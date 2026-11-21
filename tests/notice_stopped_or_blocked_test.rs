@@ -34,7 +34,7 @@ esac
 for a; do last="$a"; done
 case "$last" in
   *CRASH*) exit 3 ;;
-  *BLOCKED*) printf '%s\n' '{"type":"result","is_error":false,"num_turns":1,"result":"I looked for the backup.\n\nBlocked: the backup drive isn't mounted. Plug it in and tell me to try again."}' ;;
+  *BLOCKED*) printf '%s\n' '{"type":"result","is_error":false,"num_turns":1,"result":"I looked for the backup.\n\nBlocked: the backup drive isn'\''t mounted. Plug it in and tell me to try again."}' ;;
   *KEYED*) printf '%s\n' '{"type":"result","is_error":false,"num_turns":1,"result":"GitHub said no.\n\nBlocked: GitHub refused ghp_abcdefghijklmnop1234 so paste a new token in Settings."}' ;;
   *DONE*) printf '%s\n' '{"type":"result","is_error":false,"num_turns":1,"result":"Here is the plan.\n\nDone: 3-day plan saved, with the museum on day 2."}' ;;
   *) printf '%s\n' '{"type":"result","is_error":false,"num_turns":1,"result":"answer"}' ;;
