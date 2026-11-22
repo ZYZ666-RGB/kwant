@@ -1,8 +1,8 @@
 class Kwnt < Formula
   desc "Self-hosted team of AI bots with handoffs, approvals and routines"
   homepage "https://kwant.si"
-  url "https://github.com/alexsergivan/kwant/archive/refs/tags/mac-v0.9.17.tar.gz"
-  sha256 "28aa19ddb26195f33bb6854b6d7d258e0696ce3fe0846fe875b7d785ac9611c4"
+  url "https://github.com/alexsergivan/kwant/archive/refs/tags/mac-v0.9.40.tar.gz"
+  sha256 "e85658ba7339b404f9868511341a633668f367bcd764a486cb00e1dc09861a9c"
   license "AGPL-3.0-only"
   head "https://github.com/alexsergivan/kwant.git", branch: "main"
 
