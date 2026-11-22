@@ -337,19 +337,19 @@ mod tests {
         let t = turn(&[step("Read", true), step("Bash", false)], None);
         assert_eq!(
             note_text(&t),
-            "kwant restarted while Ben was replying (in the middle of running a command), so Ben is continuing it now and checks first whether that step already took effect."
+            "kwant restarted while Ben was replying, in the middle of running a command, so Ben is continuing it now and checks first whether that step already took effect."
         );
         assert_eq!(note_meta(&t)["cut_off_step"], "Bash", "the meta keeps the raw name");
 
         let t = turn(&[step("WebFetch", false)], None);
-        assert_eq!(note_text(&t), "kwant restarted while Ben was replying (in the middle of opening a page). It only read, so Ben is carrying on.");
+        assert_eq!(note_text(&t), "kwant restarted while Ben was replying, in the middle of opening a page. That step doesn't change anything, so Ben is carrying on.");
         assert_eq!(note_meta(&t)["cut_off_step"], "WebFetch");
 
         // An MCP read reads as its server's words; an unknown one as its spaced name and server
         let t = turn(&[step("mcp__gh__get_file", false)], None);
-        assert_eq!(note_text(&t), "kwant restarted while Ben was replying (in the middle of using get file (gh)). It only read, so Ben is carrying on.");
+        assert_eq!(note_text(&t), "kwant restarted while Ben was replying, in the middle of using get file (gh). That step doesn't change anything, so Ben is carrying on.");
         let t = turn(&[step("mcp__srv__foo_bar", false)], None);
-        assert!(note_text(&t).contains("(in the middle of using foo bar (srv)), so Ben is continuing it now and checks first"), "{}", note_text(&t));
+        assert!(note_text(&t).contains(", in the middle of using foo bar (srv), so Ben is continuing it now and checks first"), "{}", note_text(&t));
 
         // No step: today's sentence, byte for byte
         assert_eq!(note_text(&turn(&[], None)), "kwant restarted while Ben was replying, so Ben is continuing it now.");
@@ -359,6 +359,7 @@ mod tests {
         for name in ["Bash", "Edit", "Write", "WebFetch", "WebSearch", "Read", "mcp__slack__send_message", "mcp__gh__create_pull_request", "mcp__browser__agent_browser_snapshot", "Task", "mcp__x__`q`"] {
             let text = note_text(&turn(&[step(name, false)], None));
             assert!(!text.contains('`'), "no backtick in the person's note: {text}");
+            assert!(!text.contains("(in the middle of"), "commas set off the step, never brackets: {text}");
         }
     }
 
