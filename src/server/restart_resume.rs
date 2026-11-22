@@ -16,6 +16,7 @@
 
 use crate::db::continuity::RunningTurn;
 use crate::drivers::RuntimeEvent;
+use crate::server::tool_words;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -139,10 +140,10 @@ pub fn cut_off_outward(t: &RunningTurn) -> Option<Step> {
 /// it isn't continued, and the one action (tell the bot in the chat).
 pub fn outward_line(t: &RunningTurn, step: &Step) -> String {
     format!(
-        "{name}'s reply was cut off when kwant restarted, in the middle of `{step}`, which may already have gone out. \
+        "{name}'s reply was cut off when kwant restarted, in the middle of {step}, which may already have gone out. \
          kwant won't run it again by itself. Check whether it went out, then tell {name} in the chat whether to do it again.",
         name = t.kwant_name,
-        step = step.name,
+        step = tool_words::doing(&step.name, None),
     )
 }
 
@@ -196,19 +197,29 @@ pub fn prompt(t: &RunningTurn) -> Option<String> {
     Some(format!("{note}\n\n{original}"))
 }
 
-/// The step that was cut off mid-call, for the chat's note.
-pub fn cut_off_step(t: &RunningTurn) -> Option<String> {
-    steps_of(t).into_iter().rev().find(|s| !s.done).map(|s| s.name)
+fn cut_off(t: &RunningTurn) -> Option<Step> {
+    steps_of(t).into_iter().rev().find(|s| !s.done)
 }
 
-/// The chat's note when the reply continues by itself.
+/// The step that was cut off mid-call (its raw name, for the note's meta).
+pub fn cut_off_step(t: &RunningTurn) -> Option<String> {
+    cut_off(t).map(|s| s.name)
+}
+
+/// The chat's note when the reply continues by itself. The cut-off step is said in plain words
+/// ([`tool_words::doing`], 33n); a step that only read needs no checking, so the bot just carries on.
 pub fn note_text(t: &RunningTurn) -> String {
-    match cut_off_step(t) {
-        Some(step) => format!(
-            "kwant restarted while {} was replying (in the middle of `{step}`), so {} is continuing it now and checks first whether that step already took effect.",
-            t.kwant_name, t.kwant_name
+    let name = &t.kwant_name;
+    match cut_off(t) {
+        Some(step) if step.read_only => format!(
+            "kwant restarted while {name} was replying (in the middle of {}). It only read, so {name} is carrying on.",
+            tool_words::doing(&step.name, None)
         ),
-        None => format!("kwant restarted while {} was replying, so {} is continuing it now.", t.kwant_name, t.kwant_name),
+        Some(step) => format!(
+            "kwant restarted while {name} was replying (in the middle of {}), so {name} is continuing it now and checks first whether that step already took effect.",
+            tool_words::doing(&step.name, None)
+        ),
+        None => format!("kwant restarted while {name} was replying, so {name} is continuing it now."),
     }
 }
 
