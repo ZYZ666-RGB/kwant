@@ -538,7 +538,7 @@ async fn a_reply_cut_off_mid_step_by_a_restart_continues_by_itself_once() {
     let text = notes[0]["text"].as_str().unwrap();
     assert_eq!(
         text,
-        "kwant restarted while Clio was replying (in the middle of running a command), so Clio is continuing it now and checks first whether that step already took effect.",
+        "kwant restarted while Clio was replying, in the middle of running a command, so Clio is continuing it now and checks first whether that step already took effect.",
         "33n: plain words, no tool id"
     );
     assert!(!text.contains("Send your message again"), "{text}");
@@ -615,11 +615,11 @@ async fn a_read_cut_off_by_a_restart_runs_again_and_a_waiting_card_is_left_to_th
     env.state.db.add_running_turn(&cut_off_turn("turn-read", &kid, steps_json("mcp__browser__agent_browser_snapshot", true), false)).await.unwrap();
     let mut rx = env.state.event_sender.subscribe();
     assert_eq!(routes::interrupt_running_turns(&env.state).await, 1);
-    // 33n: the chat says it only read, so the bot carries on (no "checks first" worry, no tool id)
+    // 33n: the chat says the step doesn't change anything, so the bot carries on (no "checks first" worry, no tool id)
     let (_, msgs) = call(&env.app, "GET", &format!("/api/channels/{kid}/messages"), None).await;
     let note = msgs.as_array().unwrap().iter().find(|m| m["sender_role"] == "system").expect("a note").clone();
     let text = note["text"].as_str().unwrap();
-    assert!(text.ends_with(". It only read, so Clio is carrying on."), "{text}");
+    assert!(text.ends_with(". That step doesn't change anything, so Clio is carrying on."), "{text}");
     assert!(!text.contains("checks first") && !text.contains('`') && !text.contains("mcp__"), "{text}");
     let meta: Value = serde_json::from_str(note["meta"].as_str().unwrap()).unwrap();
     assert_eq!(meta["cut_off_step"], "mcp__browser__agent_browser_snapshot");

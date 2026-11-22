@@ -207,16 +207,17 @@ pub fn cut_off_step(t: &RunningTurn) -> Option<String> {
 }
 
 /// The chat's note when the reply continues by itself. The cut-off step is said in plain words
-/// ([`tool_words::doing`], 33n); a step that only read needs no checking, so the bot just carries on.
+/// ([`tool_words::doing`], 33n), set off by commas so an MCP fallback's "(server)" never nests in
+/// brackets; a step that doesn't change anything needs no checking, so the bot just carries on.
 pub fn note_text(t: &RunningTurn) -> String {
     let name = &t.kwant_name;
     match cut_off(t) {
         Some(step) if step.read_only => format!(
-            "kwant restarted while {name} was replying (in the middle of {}). It only read, so {name} is carrying on.",
+            "kwant restarted while {name} was replying, in the middle of {}. That step doesn't change anything, so {name} is carrying on.",
             tool_words::doing(&step.name, None)
         ),
         Some(step) => format!(
-            "kwant restarted while {name} was replying (in the middle of {}), so {name} is continuing it now and checks first whether that step already took effect.",
+            "kwant restarted while {name} was replying, in the middle of {}, so {name} is continuing it now and checks first whether that step already took effect.",
             tool_words::doing(&step.name, None)
         ),
         None => format!("kwant restarted while {name} was replying, so {name} is continuing it now."),
@@ -348,19 +349,19 @@ mod tests {
         let t = turn(&[step("Read", true), step("Bash", false)], None);
         assert_eq!(
             note_text(&t),
-            "kwant restarted while Ben was replying (in the middle of running a command), so Ben is continuing it now and checks first whether that step already took effect."
+            "kwant restarted while Ben was replying, in the middle of running a command, so Ben is continuing it now and checks first whether that step already took effect."
         );
         assert_eq!(note_meta(&t)["cut_off_step"], "Bash", "the meta keeps the raw name");
 
         let t = turn(&[step("WebFetch", false)], None);
-        assert_eq!(note_text(&t), "kwant restarted while Ben was replying (in the middle of opening a page). It only read, so Ben is carrying on.");
+        assert_eq!(note_text(&t), "kwant restarted while Ben was replying, in the middle of opening a page. That step doesn't change anything, so Ben is carrying on.");
         assert_eq!(note_meta(&t)["cut_off_step"], "WebFetch");
 
         // An MCP read reads as its server's words; an unknown one as its spaced name and server
         let t = turn(&[step("mcp__gh__get_file", false)], None);
-        assert_eq!(note_text(&t), "kwant restarted while Ben was replying (in the middle of using get file (gh)). It only read, so Ben is carrying on.");
+        assert_eq!(note_text(&t), "kwant restarted while Ben was replying, in the middle of using get file (gh). That step doesn't change anything, so Ben is carrying on.");
         let t = turn(&[step("mcp__srv__foo_bar", false)], None);
-        assert!(note_text(&t).contains("(in the middle of using foo bar (srv)), so Ben is continuing it now and checks first"), "{}", note_text(&t));
+        assert!(note_text(&t).contains(", in the middle of using foo bar (srv), so Ben is continuing it now and checks first"), "{}", note_text(&t));
 
         // No step: today's sentence, byte for byte
         assert_eq!(note_text(&turn(&[], None)), "kwant restarted while Ben was replying, so Ben is continuing it now.");
@@ -370,6 +371,7 @@ mod tests {
         for name in ["Bash", "Edit", "Write", "WebFetch", "WebSearch", "Read", "mcp__slack__send_message", "mcp__gh__create_pull_request", "mcp__browser__agent_browser_snapshot", "Task", "mcp__x__`q`"] {
             let text = note_text(&turn(&[step(name, false)], None));
             assert!(!text.contains('`'), "no backtick in the person's note: {text}");
+            assert!(!text.contains("(in the middle of"), "commas set off the step, never brackets: {text}");
         }
     }
 
