@@ -810,8 +810,8 @@ const FILE_EXTENSIONS: &[&str] = &[
 
 /// `local@domain.tld`: one `@`, a dot in the domain and a last part of two or more letters, so
 /// `left-pad@1.2.3`, `react@18` and `@types/node` aren't addresses. A file name with an `@` isn't
-/// one either (33o QA, Nov 22): a retina name (`logo@2x.png`, `<digits>x.` after the `@`) or one
-/// ending in a file type from [`FILE_EXTENSIONS`].
+/// one either (33o QA, Nov 22): one ending in a file type from [`FILE_EXTENSIONS`], which covers
+/// retina names such as `logo@2x.png`.
 fn is_email(text: &str) -> bool {
     let Some((local, domain)) = text.split_once('@') else { return false };
     let labels: Vec<&str> = domain.split('.').collect();
@@ -823,11 +823,11 @@ fn is_email(text: &str) -> bool {
         && !file_name_like(&labels)
 }
 
-/// The part after the `@` reads as a file name: `2x.png`, `3x.svg`, `scope.js`.
+/// The part after the `@` reads as a file name: `2x.png`, `3x.svg`, `scope.js`. Only the file type
+/// decides: a retina-looking first part alone (`me@2x.com`, `ops@3x.company.co.uk`) is a real
+/// domain, so it stays an address (33o QA re-check, Rigel).
 fn file_name_like(labels: &[&str]) -> bool {
-    let retina = labels.first().and_then(|l| l.strip_suffix(['x', 'X'])).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
-    let ext = labels.last().is_some_and(|l| FILE_EXTENSIONS.contains(&l.to_ascii_lowercase().as_str()));
-    retina || ext
+    labels.last().is_some_and(|l| FILE_EXTENSIONS.contains(&l.to_ascii_lowercase().as_str()))
 }
 
 fn git(args: &[Word], ctx: &Ctx) -> Verdict {
@@ -2313,6 +2313,11 @@ mod tests {
             // 33o QA Minor 1: a real address that only looks like a file stays an address
             "python3 x.py --to me@x.io",
             "python3 x.py --to ops@company.co.uk",
+            // 33o QA re-check: a retina-looking domain is still a domain
+            "python3 x.py --to me@2x.com",
+            "python3 x.py --to me@1x.io",
+            "python3 x.py --to me@2x.example.com",
+            "python3 x.py --to ops@3x.company.co.uk",
             // kwnt's own server is never fine for a script either
             "python3 x.py http://localhost:8799/api/spaces",
             "node x.js ws://127.0.0.1:8800/",
