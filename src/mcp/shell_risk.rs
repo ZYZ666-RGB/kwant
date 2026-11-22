@@ -763,11 +763,13 @@ fn outward_arg(args: &[Word]) -> Option<(Outward, String)> {
             let host_port = rest[..end].rsplit_once('@').map_or(&rest[..end], |(_, h)| h);
             let more = if end < rest.len() && &rest[end..] != "/" { "/…" } else { "" };
             let shown: String = format!("{}://{host_port}{more}", scheme.to_ascii_lowercase()).chars().take(80).collect();
-            if kwnt_url(&as_http) {
-                return Some((Outward::Kwnt, shown));
-            }
             match split_url(&as_http) {
-                Some((host, _, _)) if loopback_host(&host) => continue,
+                Some((host, _, _)) if script_local_host(&host) => {
+                    if kwnt_url(&as_http) {
+                        return Some((Outward::Kwnt, shown));
+                    }
+                    continue;
+                }
                 _ => return Some((Outward::Web, shown)),
             }
         }
@@ -779,8 +781,37 @@ fn outward_arg(args: &[Word]) -> Option<(Outward, String)> {
     None
 }
 
+/// 33o QA (Rigel, Nov 22): whether a host a script is given stays on this computer. Stricter than
+/// [`loopback_host`], which only ever adds asks for [`kwnt_url`]: a name counts only if it is
+/// `localhost` or ends in `.localhost`, and a number only if it is a whole IP address that is
+/// loopback or unspecified (`127.0.0.1`, `127.1.2.3`, `[::1]`, `0.0.0.0`). So `127.evil.com` and
+/// `127.0.0.1.evil.example` ask.
+fn script_local_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let bare = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(&host);
+    let named_local = (bare == "localhost" || bare.ends_with(".localhost"))
+        && bare.split('.').all(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    named_local || bare.parse::<std::net::IpAddr>().is_ok_and(loopback_ip)
+}
+
+/// An IP address that is this computer: loopback or unspecified, also IPv4-mapped.
+fn loopback_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback() || v4.is_unspecified()),
+        ip => ip.is_loopback() || ip.is_unspecified(),
+    }
+}
+
+/// File types an `@` often sits in front of in a file name (`logo@2x.png`, `name@scope.js`). Only
+/// ones that aren't also common real domains (so not md, zip, mov, ai, io).
+const FILE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "svg", "webp", "avif", "ico", "js", "mjs", "cjs", "ts", "tsx", "jsx", "json", "css", "map", "gz", "tgz",
+];
+
 /// `local@domain.tld`: one `@`, a dot in the domain and a last part of two or more letters, so
-/// `left-pad@1.2.3`, `react@18` and `@types/node` aren't addresses.
+/// `left-pad@1.2.3`, `react@18` and `@types/node` aren't addresses. A file name with an `@` isn't
+/// one either (33o QA, Nov 22): a retina name (`logo@2x.png`, `<digits>x.` after the `@`) or one
+/// ending in a file type from [`FILE_EXTENSIONS`].
 fn is_email(text: &str) -> bool {
     let Some((local, domain)) = text.split_once('@') else { return false };
     let labels: Vec<&str> = domain.split('.').collect();
@@ -789,6 +820,14 @@ fn is_email(text: &str) -> bool {
         && labels.len() >= 2
         && labels.iter().all(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
         && labels.last().is_some_and(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()))
+        && !file_name_like(&labels)
+}
+
+/// The part after the `@` reads as a file name: `2x.png`, `3x.svg`, `scope.js`.
+fn file_name_like(labels: &[&str]) -> bool {
+    let retina = labels.first().and_then(|l| l.strip_suffix(['x', 'X'])).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    let ext = labels.last().is_some_and(|l| FILE_EXTENSIONS.contains(&l.to_ascii_lowercase().as_str()));
+    retina || ext
 }
 
 fn git(args: &[Word], ctx: &Ctx) -> Verdict {
@@ -1503,10 +1542,7 @@ fn loopback_host(host: &str) -> bool {
         || bare.ends_with(".localhost")
         || bare.starts_with("127.")
         || bare.starts_with("::ffff:127.")
-        || bare.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
-            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback() || v4.is_unspecified()),
-            ip => ip.is_loopback() || ip.is_unspecified(),
-        })
+        || bare.parse::<std::net::IpAddr>().is_ok_and(loopback_ip)
 }
 
 /// `url` split into a lowercase host, its port (80 or 443 when none is written) and a normalised lowercase
@@ -2269,6 +2305,14 @@ mod tests {
             "bun x.ts https://example.com",
             "python3 -m mytool --url https://example.com",
             "python3 x.py http://10.0.0.5:8080/",
+            // 33o QA Finding 1: hosts that only start like this computer
+            "python3 x.py http://127.evil.com/",
+            "python3 x.py http://127.0.0.1.evil.example/x",
+            "node x.js http://localhost.evil.example:3000/",
+            "python3 x.py http://[::ffff:127.0.0.1.evil.example]/",
+            // 33o QA Minor 1: a real address that only looks like a file stays an address
+            "python3 x.py --to me@x.io",
+            "python3 x.py --to ops@company.co.uk",
             // kwnt's own server is never fine for a script either
             "python3 x.py http://localhost:8799/api/spaces",
             "node x.js ws://127.0.0.1:8800/",
@@ -2302,6 +2346,14 @@ mod tests {
             ask("`python3` is given a web address (`https://api.example.com/…`), so it may send something outside the folder")
         );
         assert_eq!(
+            classify("python3 x.py http://127.evil.com/", &ws),
+            ask("`python3` is given a web address (`http://127.evil.com`), so it may send something outside the folder")
+        );
+        assert_eq!(
+            classify("python3 x.py http://127.evil.com:8799/api/spaces", &ws),
+            ask("`python3` is given a web address (`http://127.evil.com:8799/…`), so it may send something outside the folder")
+        );
+        assert_eq!(
             classify("python3 x.py http://localhost:8799/api/spaces", &ws),
             ask("`python3` is given kwnt's own address (`http://localhost:8799/…`), whose settings only the person may change")
         );
@@ -2320,6 +2372,19 @@ mod tests {
             "python3 x.py user@localhost",
             "python3 -m pytest -q",
             "./run.sh --out=src/x.txt",
+            // 33o QA Finding 1: whole loopback addresses still run
+            "node e2e.js http://127.1.2.3:3000/",
+            "python3 x.py http://[::1]:3000/",
+            "python3 x.py http://[::ffff:127.0.0.1]:3000/",
+            "python3 x.py http://LOCALHOST:8000/",
+            "python3 serve.py localhost:8000",
+            "python3 x.py http://evil.example@127.0.0.1:3000/",
+            // 33o QA Minor 1: file names with an `@` aren't email addresses
+            "node build.js logo@2x.png",
+            "node build.js icon@3x.svg",
+            "node build.js --out=results@2x.png",
+            "node build.js name@scope.js",
+            "node build.js Logo@2X.PNG",
             // Known programs keep today's rules
             "echo billing@acme.example",
             "git commit -m 'Mail ops@acme.example about the invoice'",
