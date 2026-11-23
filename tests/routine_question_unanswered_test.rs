@@ -116,7 +116,9 @@ async fn a_routine_whose_question_nobody_answers_needs_you_and_isnt_done() {
 async fn a_routine_whose_question_is_answered_in_time_stays_ok() {
     let env = setup().await;
     env.state.questions.set_wait(Duration::from_secs(30));
-    let ask = ask_marker("Which one should I check first, EU or US?", &["EU", "US"]);
+    // Its own question: the fake CLI runs each CALLTOOL marker once per test binary (a `called-<sha1>`
+    // file next to the shared prompts folder), so the same marker as the test above would never ask
+    let ask = ask_marker("Which market should the digest open with, EU or US?", &["EU", "US"]);
     let id = routine(&env, "Digest", &format!("Post the weekly digest {ask} REPLYTAG:digesta")).await;
 
     let run_id = start(&env, &id).await;
