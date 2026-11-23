@@ -231,6 +231,9 @@ fn steady(mut v: Value) -> Value {
     v
 }
 
+/// One call in `every_route`: who, which port, method, path, body, request.
+type Call<'a> = (&'a str, &'a Router, &'a str, String, Option<Value>, Req<'a>);
+
 /// Every route a host, guest A or a stranger can call on a drawn Santa pocket, with what each
 /// answered (status and steady body). `a` is A's guest key.
 async fn every_route(t: &T, code: &str, host_key: &str, a_key: &str) -> Vec<(String, StatusCode, Value)> {
@@ -238,7 +241,7 @@ async fn every_route(t: &T, code: &str, host_key: &str, a_key: &str) -> Vec<(Str
     let g = |p: &str| format!("/api/pocket/{code}{p}");
     let m = |p: &str| format!("/api/pockets/{code}{p}");
     let stranger = || Req { ip: Some(fresh_ip()), ..Default::default() };
-    let calls: Vec<(&str, &Router, &str, String, Option<Value>, Req)> = vec![
+    let calls: Vec<Call> = vec![
         // The person, on the main port
         ("person", &t.main, "GET", "/api/pockets".into(), None, person()),
         ("person", &t.main, "GET", m(""), None, person()),
