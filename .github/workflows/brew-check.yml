@@ -1,0 +1,103 @@
+# One-off check for Homebrew/homebrew-core#327167 (kwnt). Not for main: this branch only holds this
+# workflow and the formula as it would be pushed to the homebrew-core PR.
+name: brew check (homebrew-core 327167)
+on:
+  push:
+    branches: [ada-brew-327167-check]
+permissions:
+  contents: read
+concurrency:
+  group: brew-check-327167
+  cancel-in-progress: true
+jobs:
+  brew:
+    name: brew (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_FROM_API: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+      HOMEBREW_NO_ENV_HINTS: "1"
+      HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Homebrew on PATH (Linux)
+        if: runner.os == 'Linux'
+        run: echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+      - name: Newest Homebrew and homebrew/core, formula in the core tap
+        run: |
+          set -euo pipefail
+          repo="$(brew --repository)"
+          git -C "$repo" fetch --quiet --force origin main
+          git -C "$repo" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
+          core="$repo/Library/Taps/homebrew/homebrew-core"
+          rm -rf "$core"
+          git clone --quiet --depth 1 https://github.com/Homebrew/homebrew-core "$core"
+          brew --version
+          git -C "$repo" log -1 --format='Homebrew/brew %h %cd'
+          git -C "$core" log -1 --format='homebrew-core %h %cd'
+          grep -n 'def std_cargo_fetch_args' "$repo/Library/Homebrew/formula.rb"
+          mkdir -p "$core/Formula/k"
+          cp kwnt.rb "$core/Formula/k/kwnt.rb"
+      - name: brew style
+        run: brew style kwnt
+      - name: brew install --build-from-source
+        run: brew install --build-from-source --verbose kwnt
+      - name: brew test
+        run: brew test --verbose kwnt
+      - name: brew test with outbound network blocked (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -uo pipefail
+          uid=$(id -u)
+          sudo iptables -I OUTPUT 1 -m owner --uid-owner "$uid" ! -o lo -j REJECT
+          sudo iptables -I OUTPUT 1 -m owner --uid-owner "$uid" -p udp -d 127.0.0.53 --dport 53 -j REJECT
+          sudo iptables -I OUTPUT 1 -m owner --uid-owner "$uid" -p tcp -d 127.0.0.53 --dport 53 -j REJECT
+          sudo ip6tables -I OUTPUT 1 -m owner --uid-owner "$uid" ! -o lo -j REJECT
+          if curl -s -m 5 -o /dev/null https://github.com; then echo "::error::outbound network is not blocked"; exit 1; fi
+          echo "Outbound network and DNS are blocked for uid $uid; only 127.0.0.1 works"
+          sudo iptables -Z OUTPUT; sudo ip6tables -Z OUTPUT
+          status=0
+          brew test --verbose kwnt || status=$?
+          echo "brew test exit status with no network: $status"
+          echo "Outbound packets refused during that brew test (pkts column; 0 = it never tried):"
+          sudo iptables -L OUTPUT -v -n -x | sed -n '1,6p'
+          sudo ip6tables -L OUTPUT -v -n -x | sed -n '1,4p'
+          for _ in 1 2 3; do sudo iptables -D OUTPUT 1; done
+          sudo ip6tables -D OUTPUT 1
+          exit $status
+      - name: Linkage
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          brew linkage --test kwnt
+          brew linkage kwnt
+          if [ "$RUNNER_OS" = Linux ]; then ldd "$(brew --prefix)/bin/kwnt" | grep -E 'libssl|libcrypto'; fi
+      - name: A real HTTPS download through kwnt's TLS stack
+        # POST /api/import/github/preview makes kwnt download a public repository from GitHub over
+        # HTTPS (reqwest; OpenSSL on Linux). 502 fetch_failed would mean the download failed.
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          export KWNT_DATA_DIR="$RUNNER_TEMP/kwnt-data" KWNT_LAYA_MANAGED=0
+          port=18765
+          kwnt serve --host 127.0.0.1 --port "$port" --no-laya > "$RUNNER_TEMP/serve.log" 2>&1 &
+          pid=$!
+          curl -s --retry 30 --retry-delay 1 --retry-connrefused "http://127.0.0.1:$port/api/health"; echo
+          code=$(curl -s -o "$RUNNER_TEMP/gh.json" -w '%{http_code}' -H 'Content-Type: application/json' \
+            -d '{"url":"https://github.com/octocat/Hello-World"}' "http://127.0.0.1:$port/api/import/github/preview")
+          echo "HTTP $code"; head -c 800 "$RUNNER_TEMP/gh.json"; echo
+          kill -TERM "$pid"; wait "$pid"; echo "kwnt serve exit status after TERM: $?"
+          tail -5 "$RUNNER_TEMP/serve.log"
+          [ "$code" != "502" ] && [ "$code" != "000" ]
+      - name: brew audit --strict --online
+        if: ${{ !cancelled() }}
+        run: brew audit --strict --online kwnt
+      - name: brew audit --new --strict --online (what homebrew-core runs on a new formula)
+        if: ${{ !cancelled() }}
+        run: brew audit --new --strict --online kwnt
