@@ -418,7 +418,7 @@ impl ActivityLog {
     /// steps to broadcast: the thinking step it ended, if any, then the new one.
     pub fn question_unanswered(&mut self, ref_id: &str, question: &str) -> Vec<Step> {
         let mut changed: Vec<Step> = self.close_thinking().into_iter().collect();
-        if let Some(i) = self.push("question", "unanswered", format!("Waiting for your answer: {question}")) {
+        if let Some(i) = self.push("question", "unanswered", format!("Asked you: {question}")) {
             self.steps[i].ref_id = Some(ref_id.to_string());
             self.steps[i].tool = Some(QUESTION_TOOL.to_string());
             self.steps[i].detail = Some(crate::mcp::QUESTION_STEP_DETAIL.to_string());

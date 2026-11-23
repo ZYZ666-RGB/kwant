@@ -73,12 +73,12 @@ export const questionRun = (error: string | null | undefined): boolean => error 
  * `needs_you` run keeps that link when this session saw the card, since the card stays open after the wait.
  * An unknown status reads as itself, in the skipped tone. `incomplete`'s reason shows under it (routineRunNote);
  * an `incomplete` run the person said no to (28b's sentence) reads "You said no" in grey (28f). A `needs_you` run that
- * waits on a question reads "Waiting for your answer", with no card link (unanswered-question-not-ok).
+ * waits on a question reads "Needed your answer, didn’t finish", with no card link (unanswered-question-not-ok).
  */
 export function runRowState(run: { status: string; error?: string | null }, wait?: RunWait | null): RunRowState {
   if (run.status === 'running' && wait?.waiting) return { label: 'Waiting for you', tone: 'waiting', cardId: wait.approval_id };
   if (run.status === 'incomplete' && saidNoRun(run.error)) return { label: 'You said no', tone: 'said_no', cardId: null };
-  if (run.status === 'needs_you' && questionRun(run.error)) return { label: 'Waiting for your answer', tone: 'needs_you', cardId: null };
+  if (run.status === 'needs_you' && questionRun(run.error)) return { label: 'Needed your answer, didn’t finish', tone: 'needs_you', cardId: null };
   const known = RUN_LABEL[run.status];
   const cardId = run.status === 'needs_you' ? wait?.approval_id ?? null : null;
   return known ? { ...known, cardId } : { label: run.status, tone: 'skipped', cardId: null };

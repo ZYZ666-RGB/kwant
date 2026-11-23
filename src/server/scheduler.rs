@@ -659,7 +659,7 @@ pub const NEEDS_YOU_ERROR: &str = "A step is waiting for your approval, so it di
 
 /// unanswered-question-not-ok: a routine run's error when it waits on a question (`ask_user`)
 /// nobody answered (status `needs_you`). The open question is its one Inbox item
-/// (`db::away::FAILED_RUNS` leaves the run out), and History reads "Waiting for your answer".
+/// (`db::away::FAILED_RUNS` leaves the run out), and History reads "Needed your answer, didn’t finish".
 pub const QUESTION_ERROR: &str = "A step is waiting for your answer, so it didn't finish";
 
 /// What a routine's turn did, once it replied.

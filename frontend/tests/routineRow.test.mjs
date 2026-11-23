@@ -141,12 +141,12 @@ test('28f: RunRow draws a said-no run grey and keeps a real failure rose', () =>
 });
 
 // unanswered-question-not-ok: a needs_you run that waits on a question (scheduler.rs QUESTION_ERROR) reads
-// "Waiting for your answer"; one that waits on an approval card keeps 26b's words.
+// "Needed your answer, didn’t finish"; one that waits on an approval card keeps 26b's words.
 const QUESTION_ERROR = "A step is waiting for your answer, so it didn't finish";
 const APPROVAL_ERROR = "A step is waiting for your approval, so it didn't run";
 
-test('unanswered question: a needs_you run waiting on a question reads "Waiting for your answer"', () => {
-  assert.deepEqual(r.runRowState({ status: 'needs_you', error: QUESTION_ERROR }), { label: 'Waiting for your answer', tone: 'needs_you', cardId: null });
+test('unanswered question: a needs_you run waiting on a question reads "Needed your answer, didn’t finish"', () => {
+  assert.deepEqual(r.runRowState({ status: 'needs_you', error: QUESTION_ERROR }), { label: 'Needed your answer, didn’t finish', tone: 'needs_you', cardId: null });
   assert.equal(r.questionRun(QUESTION_ERROR), true);
   for (const error of [APPROVAL_ERROR, null, undefined, `${QUESTION_ERROR}.`, `x ${QUESTION_ERROR}`]) assert.equal(r.questionRun(error), false, String(error));
 });
@@ -165,7 +165,7 @@ test('unanswered question: RunRow shows the words once, with no card link and no
   const runOf = (id, status, error) => ({ id, routine_id: 'rt1', trigger: 'schedule', started_at: '2026-11-19T08:00:00Z', ended_at: null, status, error, message_id: null });
   const html = ui.run({ routine, run: runOf('r-q', 'needs_you', QUESTION_ERROR), onOpenRunCard: () => {} });
   assert.match(html, /data-run-state="needs_you"/);
-  assert.match(html, />Waiting for your answer</);
+  assert.match(html, />Needed your answer, didn’t finish</);
   assert.doesNotMatch(html, /Needed your approval/);
   assert.doesNotMatch(html, /A step is waiting for your answer/, 'the badge says it; no repeat');
   assert.doesNotMatch(html, /data-run-card/, 'a question has no approval card to open');
