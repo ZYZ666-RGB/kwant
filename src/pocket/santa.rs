@@ -197,7 +197,12 @@ struct St {
     /// Questions plus answers sent today: player → (UTC day, count).
     sent: BTreeMap<String, (String, i64)>,
     /// A late joiner changed this player's match (the page says so until they open it again).
+    /// `looked` and `ready` stay as they were, so the host's ticks and counts never show who
+    /// buys for the late joiner; only this player's own page treats the match as unopened.
     changed: BTreeMap<String, DateTime<Utc>>,
+    /// Givers whose "I've got the gift" tick was for the match before a late joiner changed it.
+    /// The host still sees the tick; the giver's page shows it off until they tick again.
+    ready_old: BTreeSet<String>,
     /// Why Draw is off right now (only while collecting).
     block: Option<BlockInfo>,
 }
@@ -251,6 +256,12 @@ impl St {
         Some(self.ring[(k + 1) % self.ring.len()].as_str())
     }
 
+    /// Whether this player has opened their current match (a late joiner's change closes it
+    /// again for them, though the host's `looked` tick stays).
+    fn opened(&self, id: &str) -> bool {
+        self.looked.contains_key(id) && !self.changed.contains_key(id)
+    }
+
     fn santa_of(&self, id: &str) -> Option<&str> {
         let k = self.ring.iter().position(|p| p == id)?;
         Some(self.ring[(k + self.ring.len() - 1) % self.ring.len()].as_str())
@@ -294,6 +305,7 @@ impl St {
         self.looked.clear();
         self.ready.clear();
         self.changed.clear();
+        self.ready_old.clear();
         self.asks.clear();
         self.block = None;
         // Counts only: an event row never names a player or a pair
@@ -315,16 +327,15 @@ impl St {
         let out = insert_into_loop(&order, new, &self.apart_fn(&keys), rng).ok_or("The kept-apart pairs leave no place for them in the loop.")?;
         let k = out.iter().position(|&i| i == new).unwrap_or(0);
         let giver = players[out[(k + out.len() - 1) % out.len()]].id.clone();
-        let old_receiver = self.receiver_of(&giver).map(str::to_string);
         self.ring = out.into_iter().map(|i| players[i].id.clone()).collect();
-        // The giver buys for someone new: their page says so, they open it again, and the
-        // old pair's questions go (they belonged to that pair only)
-        self.looked.remove(&giver);
-        self.ready.remove(&giver);
-        self.changed.insert(giver.clone(), ctx.now);
-        if let Some(r) = old_receiver {
-            self.asks.retain(|a| !(a.giver == giver && a.receiver == r));
+        // The giver buys for someone new: their page says so and they open it again. Nothing
+        // the host sees changes: `looked` and `ready` stay, and the old pair's questions stay
+        // (counted, never shown: both pages list only the current pair's), since a tick or a
+        // question count dropping would tell the host who buys for the late joiner.
+        if self.ready.contains(&giver) {
+            self.ready_old.insert(giver.clone());
         }
+        self.changed.insert(giver, ctx.now);
         Ok(())
     }
 
@@ -365,6 +376,40 @@ fn spec_str<'a>(spec: &'a Value, field: &str) -> Option<&'a str> {
 
 fn reveal_at(spec: &Value) -> Option<DateTime<Utc>> {
     spec.get("reveal_at").and_then(spec_date)
+}
+
+/// The start of the gift day: midnight UTC for a plain date, else the time given.
+fn gift_start(spec: &Value) -> Option<DateTime<Utc>> {
+    let v = spec.get("gift_on")?;
+    match v.as_str().map(str::trim).and_then(|t| chrono::NaiveDate::parse_from_str(t, "%Y-%m-%d").ok()) {
+        Some(d) => d.and_hms_opt(0, 0, 0).map(|t| t.and_utc()),
+        None => spec_date(v),
+    }
+}
+
+/// Dates that would lose data or spoil the surprise, checked at creation (dates can't change
+/// after). Everything goes `RETENTION_DAYS` after the reveal (else the gift day), and the
+/// sweeper deletes any pocket past that, so a date in the past either deletes the pocket at
+/// once or reveals the whole loop as soon as names are drawn. A day of slack on each side
+/// covers time zones (the server doesn't know the person's).
+fn check_dates(spec: &Value, now: DateTime<Utc>) -> Result<(), String> {
+    let day = chrono::Duration::days(1);
+    if let Some(gift_end) = spec.get("gift_on").and_then(spec_date) {
+        if gift_end + day <= now {
+            return Err("gift_on is already past. Use this year's gift day.".into());
+        }
+    }
+    if let Some(r) = reveal_at(spec) {
+        if r <= now {
+            return Err("reveal_at is already past, so everyone would see every match as soon as names are drawn. Pick a time on or after the gift day.".into());
+        }
+        if let Some(g) = gift_start(spec) {
+            if r < g - day {
+                return Err("reveal_at is more than a day before the gift day. The reveal is on or after the gift day (7 PM on the gift day unless the person said otherwise).".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn not_now(m: impl Into<String>) -> KitError {
@@ -425,7 +470,7 @@ impl Santa {
     fn guest_view(ctx: &KitCtx, s: &St, me: &str) -> Value {
         let mut v = Self::facts(ctx, s);
         let in_ring = s.ring.iter().any(|p| p == me);
-        let opened = s.looked.contains_key(me);
+        let opened = s.opened(me);
         let receiver = s.receiver_of(me);
         let santa = s.santa_of(me);
         // The match only after "Open it", so a peek at the network tab before then shows nothing
@@ -470,7 +515,7 @@ impl Santa {
         v["can_open"] = json!(in_ring && !opened && s.phase != COLLECTING);
         v["opened"] = json!(opened);
         v["match"] = json!(my_match);
-        v["gift_ready"] = json!(s.ready.contains(me));
+        v["gift_ready"] = json!(s.ready.contains(me) && !s.ready_old.contains(me));
         v["notices"] = json!(notices);
         v["asks"] = json!({
             "sent": sent,
@@ -582,6 +627,7 @@ impl Kit for Santa {
                 return Err("draw_at must be before the gift day.".into());
             }
         }
+        check_dates(spec, Utc::now())?;
         if let Some(e) = spec.get("expected").filter(|v| !v.is_null()) {
             match e.as_u64() {
                 Some(n) if (MIN_PEOPLE as u64..=DEFAULT_MAX_PLAYERS as u64).contains(&n) => {}
@@ -711,9 +757,10 @@ impl Kit for Santa {
                 }
             }
             (Viewer::Guest(me), "gift_ready") => {
-                if s.phase == COLLECTING || !s.looked.contains_key(me) {
+                if s.phase == COLLECTING || !s.opened(me) {
                     return Err(not_now("Open your match first."));
                 }
+                s.ready_old.remove(me);
                 if body.get("ready").and_then(Value::as_bool).unwrap_or(true) {
                     s.ready.insert(me.clone());
                 } else {
@@ -725,7 +772,7 @@ impl Kit for Santa {
                     return Err(not_now("Santa questions are open between the draw and the reveal."));
                 }
                 let receiver = s.receiver_of(me).map(str::to_string).ok_or_else(|| not_now("You're not in the draw."))?;
-                if !s.looked.contains_key(me) {
+                if !s.opened(me) {
                     return Err(not_now("Open your match first."));
                 }
                 if s.sends_today(me, now) >= SENDS_PER_DAY {
@@ -1153,5 +1200,85 @@ mod tests {
         }
         assert!(!Santa.view(&ctx, &state, &Viewer::Host).to_string().contains("CANARY"));
         assert_eq!(Santa.view(&ctx, &state, &Viewer::Host)["counts"]["questions_asked"], 1);
+    }
+
+    #[test]
+    fn a_late_joiner_changes_nothing_the_host_sees_whoever_the_giver_is() {
+        // F2 (pa10a QA): the redraw once dropped the changed giver's ticks, so the host (who
+        // typed the late name) learned who buys for the late joiner. Now every placement, with
+        // any giver, leaves the host's view and summary as they were.
+        let spec = json!({ "title": "Office Santa", "gift_on": "2026-12-18", "reveal_at": "2026-12-18T18:00:00Z" });
+        let ps = players(&["Ana", "Ben", "Cleo", "Dev", "Eli"]);
+        let now = Utc::now();
+        let mut state = Santa.init(&spec);
+        for i in 0..ps.len() {
+            Santa.on_join(&mut KitCtx::new(&spec, &ps[..=i], now), &mut state, &ps[i]);
+        }
+        let mut ctx = KitCtx::new(&spec, &ps, now);
+        Santa.act(&mut ctx, &mut state, &Viewer::Host, "draw_now", &json!({})).unwrap();
+        // Everyone looked, ticked the gift and asked; one person answered
+        for p in &ps {
+            let me = Viewer::Guest(p.id.clone());
+            for (name, body) in [("open_match", json!({})), ("gift_ready", json!({})), ("ask", json!({ "text": "Size?" }))] {
+                Santa.act(&mut ctx, &mut state, &me, name, &body).unwrap();
+            }
+        }
+        let first = load(&state).asks[0].clone();
+        Santa.act(&mut ctx, &mut state, &Viewer::Guest(first.receiver.clone()), "answer", &json!({ "id": first.id, "text": "M" })).unwrap();
+        Santa.act(&mut ctx, &mut state, &Viewer::Host, "add_late", &json!({ "name": "Yan" })).unwrap();
+        let mut all = ps.clone();
+        all.push(Player { id: "pl_yan".into(), name: "Yan".into(), avatar: "fox".into(), team: None, joined_at: now });
+        let before = load(&state);
+        let mut host_seen = HashSet::new();
+        let mut givers = HashSet::new();
+        for _ in 0..60 {
+            let mut st = state.clone();
+            let mut ctx = KitCtx::new(&spec, &all, now);
+            Santa.on_join(&mut ctx, &mut st, &all[5]);
+            let after = load(&st);
+            assert_eq!(after.ring.len(), 6, "{:?}", after.block);
+            let giver = after.santa_of("pl_yan").unwrap().to_string();
+            assert_eq!(after.changed.keys().collect::<Vec<_>>(), vec![&giver], "only the giver is told");
+            assert_eq!((&after.looked, &after.ready, &after.asks), (&before.looked, &before.ready, &before.asks), "nothing the host counts moves");
+            assert!(ctx.events.is_empty(), "no event names the giver");
+            host_seen.insert((Santa.view(&ctx, &st, &Viewer::Host).to_string(), Santa.host_summary(&ctx, &st).to_string()));
+            // The giver's own page: closed again, the old tick off, the old pair's question gone
+            let g = Santa.view(&ctx, &st, &Viewer::Guest(giver.clone()));
+            assert_eq!((g["opened"].as_bool(), g["gift_ready"].as_bool(), g["can_open"].as_bool()), (Some(false), Some(false), Some(true)), "{g}");
+            assert!(g["match"].is_null() && g["asks"]["sent"] == json!([]), "{g}");
+            Santa.act(&mut ctx, &mut st, &Viewer::Guest(giver.clone()), "open_match", &json!({})).unwrap();
+            let g = Santa.view(&ctx, &st, &Viewer::Guest(giver.clone()));
+            assert_eq!((g["match"]["id"].as_str(), g["gift_ready"].as_bool()), (Some("pl_yan"), Some(false)), "a new gift to get");
+            Santa.act(&mut ctx, &mut st, &Viewer::Guest(giver.clone()), "gift_ready", &json!({})).unwrap();
+            assert_eq!(Santa.view(&ctx, &st, &Viewer::Guest(giver.clone()))["gift_ready"], true);
+            host_seen.insert((Santa.view(&ctx, &st, &Viewer::Host).to_string(), Santa.host_summary(&ctx, &st).to_string()));
+            givers.insert(giver);
+        }
+        assert!(givers.len() >= 3, "the placements reached several givers: {givers:?}");
+        assert_eq!(host_seen.len(), 1, "the host's view is the same whoever the giver is, and stays so as they open and tick");
+    }
+
+    #[test]
+    fn dates_that_would_lose_data_or_spoil_the_reveal_are_refused() {
+        // F3 (pa10a QA): the data goes 7 days after the reveal (else the gift day), so a past
+        // date deleted the pocket at once or showed every match right after the draw
+        let now = "2026-12-01T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let s = |gift: &str, reveal: Option<&str>| json!({ "title": "x", "gift_on": gift, "reveal_at": reveal });
+        let err = |spec: Value| check_dates(&spec, now).unwrap_err();
+        assert!(err(s("2026-11-29", None)).starts_with("gift_on is already past"));
+        assert!(err(s("2025-12-18", Some("2025-12-18T18:00:00Z"))).starts_with("gift_on is already past"), "a wrong year");
+        assert!(err(s("2026-12-18", Some("2026-11-30T18:00:00Z"))).starts_with("reveal_at is already past"));
+        assert!(err(s("2026-12-18", Some("2026-12-01T12:00:00Z"))).starts_with("reveal_at is already past"), "now is past");
+        assert!(err(s("2026-12-18", Some("2026-12-10T18:00:00Z"))).starts_with("reveal_at is more than a day before"));
+        assert!(err(s("2026-12-18", Some("2026-12-16T23:59:59Z"))).starts_with("reveal_at is more than a day before"));
+        for (gift, reveal) in [
+            ("2026-12-18", Some("2026-12-18T18:00:00Z")),
+            ("2026-12-18", Some("2026-12-17T00:00:00Z")), // a day of slack for time zones
+            ("2026-12-18", Some("2027-01-06T18:00:00Z")), // after the gift day is fine
+            ("2026-12-01", Some("2026-12-01T19:00:00Z")), // the gift day is today
+            ("2026-11-30", None),                         // yesterday in UTC, today somewhere
+        ] {
+            assert_eq!(check_dates(&s(gift, reveal), now), Ok(()), "{gift} {reveal:?}");
+        }
     }
 }

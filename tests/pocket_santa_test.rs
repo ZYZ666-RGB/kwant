@@ -551,6 +551,91 @@ async fn a_late_joiner_redraws_while_nobody_looked_and_changes_one_match_after()
     }
 }
 
+/// What the host sees: the card's view and summary (main port) and the host page's view.
+async fn host_sees(t: &T, code: &str, host_key: &str) -> Value {
+    let card = send(&t.main, "GET", &format!("/api/pockets/{code}"), None, &person()).await.body;
+    let page = send(&t.guest, "GET", &format!("/api/pocket/{code}/host/state"), None, &host_req(host_key)).await.body;
+    steady(json!({ "host_view": card["host_view"], "summary": card["summary"], "page": page["view"] }))
+}
+
+#[tokio::test]
+async fn a_late_joiner_leaves_the_host_view_byte_identical() {
+    // F2 (pa10a QA): placing a late joiner after everyone looked used to drop the changed
+    // giver's ticks, which told the host (who typed the name) who buys for the late joiner
+    let t = setup().await;
+    let (code, host_key) = make(&t, spec(Utc::now(), json!({ "keep_apart": [] }))).await;
+    let mut ids = Vec::new();
+    for n in ["Ana", "Ben", "Cleo", "Dev", "Eli"] {
+        ids.push(joined(&t, &code, n).await);
+    }
+    assert_eq!(host_act(&t, &code, "draw_now", json!({})).await.status, StatusCode::OK);
+    // Everyone looked, ticked the gift and asked a question, so whoever the giver is has it all
+    for (_, k) in &ids {
+        for (name, body) in [("open_match", json!({})), ("gift_ready", json!({})), ("ask", json!({ "text": "Size?" }))] {
+            assert_eq!(act(&t, &code, k, name, body).await.status, StatusCode::OK, "{name}");
+        }
+    }
+    assert_eq!(host_act(&t, &code, "add_late", json!({ "name": "Yan" })).await.status, StatusCode::OK);
+    let loop5 = ring(&t, &code).await;
+    let before = host_sees(&t, &code, &host_key).await;
+    let yan = joined(&t, &code, "Yan").await;
+    let loop6 = ring(&t, &code).await;
+    let giver = santa_of(&loop6, &yan.0);
+    assert_eq!(receiver(&loop6, &yan.0), receiver(&loop5, &giver), "Yan sits between one giver and their old receiver");
+    let mut after = host_sees(&t, &code, &host_key).await;
+    // Take out exactly what one more person adds (their own unticked row and the joined count,
+    // and the late name is used up); every other byte must be as before
+    for part in ["host_view", "page"] {
+        let v = &mut after[part];
+        let people = v["people"].as_array_mut().unwrap();
+        let k = people.iter().position(|p| p["id"] == json!(yan.0)).unwrap();
+        let row = people.remove(k);
+        assert_eq!((row["looked"].as_bool(), row["gift_ready"].as_bool()), (Some(false), Some(false)), "{row}");
+        assert_eq!(v["late_allowed"], json!([]));
+        v["late_allowed"] = json!(["Yan"]);
+        v["joined"] = json!(v["joined"].as_i64().unwrap() - 1);
+        v["counts"]["joined"] = json!(v["counts"]["joined"].as_i64().unwrap() - 1);
+    }
+    after["summary"]["joined"] = json!(after["summary"]["joined"].as_i64().unwrap() - 1);
+    assert_eq!(after.to_string(), before.to_string(), "the host's view is byte-identical apart from the new person");
+    // The giver's own page says their match changed; opening it and ticking again changes
+    // nothing the host sees either
+    let gk = ids.iter().find(|(p, _)| *p == giver).unwrap().1.clone();
+    let v = state_of(&t, &code, &gk).await["view"].clone();
+    assert_eq!((v["notices"][0]["kind"].as_str(), v["gift_ready"].as_bool(), v["match"].is_null()), (Some("match_changed"), Some(false), true), "{v}");
+    assert_eq!(act(&t, &code, &gk, "ask", json!({ "text": "Colour?" })).await.status, StatusCode::CONFLICT, "open the new match first");
+    let still = host_sees(&t, &code, &host_key).await;
+    let v = act(&t, &code, &gk, "open_match", json!({})).await.body["view"].clone();
+    assert_eq!((v["match"]["id"].as_str(), v["gift_ready"].as_bool(), v["asks"]["sent"].clone()), (Some(yan.0.as_str()), Some(false), json!([])));
+    assert_eq!(act(&t, &code, &gk, "gift_ready", json!({})).await.status, StatusCode::OK);
+    assert_eq!(host_sees(&t, &code, &host_key).await, still, "reopening and re-ticking don't show on the host's side");
+}
+
+#[tokio::test]
+async fn past_dates_and_a_reveal_long_before_the_gift_day_are_refused_at_creation() {
+    // F3 (pa10a QA): everything goes 7 days after the reveal (else the gift day), so a past
+    // date deleted the pocket within a minute or showed every match right after the draw
+    let t = setup().await;
+    let now = Utc::now();
+    let day = |d: i64| (now + Duration::days(d)).format("%Y-%m-%d").to_string();
+    let at = |d: Duration| (now + d).to_rfc3339();
+    let empty = send(&t.main, "GET", "/api/pockets", None, &person()).await.body;
+    for (spec, says) in [
+        (json!({ "title": "x", "gift_on": day(-400), "reveal_at": format!("{}T18:00:00Z", day(-400)) }), "gift_on is already past"),
+        (json!({ "title": "x", "gift_on": day(-3), "reveal": false }), "gift_on is already past"),
+        (json!({ "title": "x", "gift_on": day(10), "reveal_at": at(-Duration::hours(1)) }), "reveal_at is already past"),
+        (json!({ "title": "x", "gift_on": day(10), "reveal_at": at(Duration::days(3)) }), "reveal_at is more than a day before the gift day"),
+    ] {
+        let r = send(&t.main, "POST", "/api/pockets", Some(json!({ "kit": "santa", "spec": spec })), &person()).await;
+        assert_eq!((r.status, r.body["error"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_spec")), "{spec}: {}", r.body);
+        assert!(r.body["message"].as_str().unwrap_or_default().starts_with(says), "{spec}: {}", r.body);
+    }
+    assert_eq!(send(&t.main, "GET", "/api/pockets", None, &person()).await.body, empty, "nothing was made");
+    // A normal spec, and one revealed the evening before the gift day, are fine
+    make(&t, spec(now, json!({}))).await;
+    make(&t, json!({ "title": "x", "gift_on": day(10), "reveal_at": format!("{}T19:00:00Z", day(9)) })).await;
+}
+
 // ---- Timers and retention (fake clock) ----
 
 #[tokio::test]
