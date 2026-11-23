@@ -33,7 +33,7 @@ class Kwnt < Formula
     cd "frontend" do
       system "npm", "run", "build"
     end
-    # Homebrew updates kwnt, so the release check is compiled out
+    # Homebrew updates kwnt, so this build never checks for new releases
     system "cargo", "install", *std_cargo_args(features: "no-update-check")
   end
 
@@ -46,13 +46,13 @@ class Kwnt < Formula
 
     # The server only talks to this local port: no outbound requests, no API keys
     port = free_port
-    url = "http://127.0.0.1:#{port}"
+    base_url = "http://127.0.0.1:#{port}"
     with_test_process bin/"kwnt", "serve", "--host", "127.0.0.1", "--port", port.to_s, "--no-laya" do |pid|
-      health = shell_output("curl -s --retry 30 --retry-delay 1 --retry-connrefused #{url}/api/health")
+      health = shell_output("curl -s --retry 30 --retry-delay 1 --retry-connrefused #{base_url}/api/health")
       assert_match '"app":"kwnt"', health
       assert_match version.to_s, health
-      assert_match "<title>kwant bots", shell_output("curl -s #{url}/")
-      assert_match '"supported":false', shell_output("curl -s #{url}/api/app/update")
+      assert_match "<title>kwant bots", shell_output("curl -s #{base_url}/")
+      assert_match '"supported":false', shell_output("curl -s #{base_url}/api/app/update")
 
       Process.kill("TERM", pid)
       Process.wait(pid)
