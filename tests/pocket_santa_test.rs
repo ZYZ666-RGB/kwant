@@ -694,8 +694,9 @@ async fn santa_needs_a_pin_and_ten_wrong_guesses_lock_the_name() {
     let r = send(&t.guest, "POST", &format!("/api/pocket/{code}/join"), Some(json!({ "name": "Ana" })), &Req { ip: Some(fresh_ip()), ..Default::default() }).await;
     assert_eq!(r.body["error"], "pin_required");
     let (id, _) = joined(&t, &code, "Ana").await;
+    let mut ids = vec![id.clone()];
     for n in ["Ben", "Cleo"] {
-        joined(&t, &code, n).await;
+        ids.push(joined(&t, &code, n).await.0);
     }
     host_act(&t, &code, "draw_now", json!({})).await;
     for _ in 0..4 {
@@ -718,8 +719,15 @@ async fn santa_needs_a_pin_and_ten_wrong_guesses_lock_the_name() {
     let reset = r.body["code"].as_str().unwrap();
     let r = send(&t.guest, "POST", &format!("/api/pocket/{code}/rejoin"), Some(json!({ "name": "Ana", "reset_code": reset, "new_pin": "2468" })), &Req { ip: Some(fresh_ip()), ..Default::default() }).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
-    // A guessed name of someone else gets nothing about them
+    // A guessed name of someone else gets nothing about them: the wrong-PIN fields only (its
+    // message says "don't match", so the word itself isn't the test), and no player's id or
+    // other name
     let r = rejoin(&t, &code, "Ben", "9999").await;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
-    assert!(!r.body.to_string().contains("match"), "{}", r.body);
+    let mut keys: Vec<&String> = r.body.as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["error", "message", "tries_left"], "{}", r.body);
+    assert_eq!(r.body["error"], "wrong_pin");
+    let text = r.body.to_string();
+    assert!(ids.iter().all(|i| !text.contains(i.as_str())) && !text.contains("Ana") && !text.contains("Cleo"), "{text}");
 }
