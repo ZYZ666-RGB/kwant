@@ -1,6 +1,6 @@
 # Local services
 
-Answers enquiries, books jobs and drafts review replies for your OK.
+Answers enquiries, keeps your bookings and drafts review replies for your OK.
 
 A ready-made front desk for a local service business: a plumber, an electrician, a cleaner, a dog groomer, a tutor. It reads enquiries and booking requests in your inbox, keeps your booking list, drafts a reminder the day before each job, and drafts replies to new reviews. Nothing goes to a customer until you have checked it and sent it yourself.
 
@@ -20,7 +20,7 @@ You can skip these. The team then asks you once in its chat.
 
 ## Starts with
 
-- Connect email: so FrontDesk can read enquiries and booking requests. Read-only (IMAP). Done when an IMAP source in Loose ends checks OK.
+- Connect email: so FrontDesk can read enquiries, booking requests and review alerts. Read-only (IMAP). Done when an IMAP source in Loose ends checks OK.
 - Connect Gmail or Outlook (optional): drafts are saved in your mail app, still unsent. Done when a Gmail or Outlook app connection is active.
 - Connect your calendar (optional): so Bookings can see free times and the jobs booked for tomorrow. Done when a Google Calendar or Outlook calendar connection is active.
 

@@ -459,7 +459,7 @@ A ready-made team as a folder anyone can write, check and share. The built-in te
   "label": "Local services",
   "icon": "store",
   "handle": "front-desk",
-  "card_line": "Answers enquiries, books jobs and drafts review replies for your OK.",
+  "card_line": "Answers enquiries, keeps your bookings and drafts review replies for your OK.",
   "mission": "…",
   "instructions": "…\nAbout the business\n- Name: {{business_name}}\n- What we offer: {{what_you_sell}}\n- Where we work: {{area}}\n…",
   "asks": [{"id": "business_name", "label": "What is your business called?", "example": "Bright Spark Electrical"}, "…"],
