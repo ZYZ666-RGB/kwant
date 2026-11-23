@@ -165,6 +165,37 @@ async fn a_fair_yes_is_sent_and_scores() {
     assert_eq!(reveal(&game), vec![1, 1]);
 }
 
+#[tokio::test]
+async fn an_item_without_a_verdict_is_not_judged_again() {
+    // pa3 qa F1: one model call per near miss. No verdict, a time-out or a failed call leaves the
+    // item to the host; the next guest's answer doesn't spend the allowance on it again.
+    for kind in [Stub::EchoGuess, Stub::Slow] {
+        let game = game_with_injections();
+        let model = StubModel::new(kind);
+        let judge = Judge::new(model.clone(), Arc::new(JudgeBudget::new(10))).with_timeout(Duration::from_millis(150));
+        let first = judge.on_answer(&game).await;
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert!(first.iter().all(|o| matches!(o, Outcome::NoVerdict { .. } | Outcome::TimedOut { .. })), "{first:?}");
+        for _ in 0..3 {
+            assert!(judge.on_answer(&game).await.is_empty(), "nothing is judged twice");
+        }
+        assert_eq!(model.calls.load(Ordering::SeqCst), 2, "one call per near miss");
+        assert_eq!(judge.budget().used(), 2);
+        assert_eq!(game.pending().len(), 2, "both stay with the host");
+    }
+}
+
+#[tokio::test]
+async fn an_item_out_of_budget_is_not_marked_tried() {
+    let game = game_with_injections();
+    let model = StubModel::new(Stub::Yes);
+    let judge = Judge::new(model.clone(), Arc::new(JudgeBudget::new(0)));
+    assert!(judge.on_answer(&game).await.iter().all(|o| matches!(o, Outcome::BudgetOut { .. })));
+    // Still out: each answer reports BudgetOut again and makes no call
+    assert_eq!(judge.on_answer(&game).await.len(), 2);
+    assert_eq!(model.calls.load(Ordering::SeqCst), 0);
+}
+
 /// The host moves on to the reveal; returns the players' scores there, highest first.
 fn reveal(game: &LockedGame) -> Vec<i64> {
     let now = Utc::now();
