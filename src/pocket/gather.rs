@@ -797,6 +797,8 @@ impl Gather {
                     .filter_map(|p| s.voted.get(&p.id).map(|at| {
                         let mut row = Self::person(p);
                         row["at"] = json!(at);
+                        // RED PROOF ONLY: leak each voter's ballot to the host (must fail the privacy test)
+                        row["ballot"] = json!(s.ballots.get(&s.ballot_key(&p.id)));
                         row
                     }))
                     .collect::<Vec<_>>());
