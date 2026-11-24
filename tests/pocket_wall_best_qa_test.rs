@@ -14,6 +14,14 @@ use kwnt::pocket::{
     schedule::{self, Origin},
     wall, wall_pick, CreateRequest, JoinRequest,
 };
+use kwnt::{
+    config::Config,
+    db::Database,
+    router::LayaRouter,
+    broker::PermissionBroker,
+    server::AppState,
+    tools::ToolRunner,
+};
 use serde_json::{json, Value};
 
 const PROPOSE: &str = "pocket_wall_propose_best";
@@ -70,6 +78,19 @@ async fn wall(env: &Env, bot: Option<&str>, n: usize, closes: Option<DateTime<Ut
     W { code, guest: guest.id, ids }
 }
 
+/// A server that comes back up on the same data: its snapshots aren't the old server's cache.
+async fn restart(env: &Env) -> AppState {
+    let data = env.tmp.path().join("data");
+    let db = Database::init(&data).await.unwrap();
+    let config = Config { data_dir: data.clone(), browser_cdp_url: Some("http://127.0.0.1:9".into()), ..Config::default() };
+    AppState::new(config.clone(), db, ToolRunner::new(data.join("workspace")), PermissionBroker::new(), LayaRouter::new(config.laya_url.clone()))
+}
+
+async fn view_on(state: &AppState, code: &str) -> Value {
+    let s = pocket::snapshot(state, code).await.unwrap().unwrap();
+    pocket::view_json(&s, &Viewer::Host, Utc::now())["view"].clone()
+}
+
 async fn host(env: &Env, code: &str) -> Value {
     let s = pocket::snapshot(&env.state, code).await.unwrap().unwrap();
     pocket::view_json(&s, &Viewer::Host, Utc::now())["view"].clone()
@@ -117,31 +138,33 @@ async fn qa_restart_in_the_middle_of_a_pick_asks_once_more_then_never() {
     plant(&env, &env.a, &call_tool_marker(PROPOSE, json!({ "code": w.code, "ids": &w.ids[..30] }))).await;
     // The first try was cut off by a restart (nothing runs here for this wall)
     leave_picking(&env, &w.code, 1).await;
+    let again = restart(&env).await;
     let at = morning_after(closes);
-    schedule::run_once(&env.state, at - Duration::minutes(5)).await;
+    schedule::run_once(&again, at - Duration::minutes(5)).await;
     assert_eq!(turns(&w.code), 0, "not before 09:00 even for a leftover");
-    schedule::run_once(&env.state, at).await;
-    schedule::run_once(&env.state, at + Duration::minutes(1)).await;
-    wait_for("the second try's proposal", || async { ids_of(&host(&env, &w.code).await["proposed_best"]).len() == 30 }).await;
-    let h = host(&env, &w.code).await;
+    schedule::run_once(&again, at).await;
+    schedule::run_once(&again, at + Duration::minutes(1)).await;
+    wait_for("the second try's proposal", || async { ids_of(&view_on(&again, &w.code).await["proposed_best"]).len() == 30 }).await;
+    let h = view_on(&again, &w.code).await;
     assert_eq!(h["budget"]["bot_calls"], 2, "{}", h["budget"]);
     assert_eq!(h["picking"], false);
-    schedule::run_once(&env.state, at + Duration::hours(3)).await;
+    schedule::run_once(&again, at + Duration::hours(3)).await;
     assert_eq!(turns(&w.code), 1, "exactly one more turn");
 
     // Cut off twice: the third time never comes, nothing is proposed, the host can star
     let w2 = wall(&env, Some(&env.a), 35, Some(closes)).await;
     plant(&env, &env.a, &call_tool_marker(PROPOSE, json!({ "code": w2.code, "ids": &w2.ids[..30] }))).await;
     leave_picking(&env, &w2.code, 2).await;
-    schedule::run_once(&env.state, at).await;
-    schedule::run_once(&env.state, at + Duration::hours(1)).await;
+    let again = restart(&env).await;
+    schedule::run_once(&again, at).await;
+    schedule::run_once(&again, at + Duration::hours(1)).await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(turns(&w2.code), 0, "no third try");
-    let h2 = host(&env, &w2.code).await;
+    let h2 = view_on(&again, &w2.code).await;
     assert_eq!(h2["picking"], false, "{h2}");
     assert!(ids_of(&h2["proposed_best"]).is_empty());
-    pocket::act(&env.state, &w2.code, &Viewer::Host, "set_best", &json!({ "ids": &w2.ids[..2] })).await.unwrap();
-    assert_eq!(host(&env, &w2.code).await["best_by"], "host");
+    pocket::act(&again, &w2.code, &Viewer::Host, "set_best", &json!({ "ids": &w2.ids[..2] })).await.unwrap();
+    assert_eq!(view_on(&again, &w2.code).await["best_by"], "host");
     // Round 2 (QA F4): the leftover that used up both tries tells the host once
     wait_reply(&env, &env.a, "I couldn't pick the best 30").await;
     let lines = common::messages(&env, &env.a).await;
