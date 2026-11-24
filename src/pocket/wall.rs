@@ -129,6 +129,10 @@ struct St {
     /// a guest's, the lobby's or the big screen's view.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     proposed_best: Vec<String>,
+    /// The proposal came from the bot's turn ([`pick_propose`]), not from "30 or fewer, so all"
+    /// ([`pick_propose_all`]): only then can the best shown be the bot's (`best_by: "snap"`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    proposed_by_bot: bool,
     /// The best shown now is the pick's proposal, unchanged (`best_by: "snap"`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     best_by_snap: bool,
@@ -593,10 +597,11 @@ impl Kit for Wall {
                 }
                 // Shown to guests from now on; an empty list takes the best away again
                 s.best_set = !chosen.is_empty();
-                // pa14b: the pick's 30 unchanged count as the bot's ("snap"); any swap or hand
-                // pick is the host's. A hand pick also means no pick ever runs after it.
+                // pa14b: the bot's proposal unchanged counts as the bot's ("snap"); any swap, a
+                // hand pick, or "30 or fewer, so all" (no bot picked anything) is the host's.
+                // A hand pick also means no pick ever runs after it.
                 let proposal: BTreeSet<String> = s.proposed_best.iter().cloned().collect();
-                s.best_by_snap = !chosen.is_empty() && chosen == proposal;
+                s.best_by_snap = s.proposed_by_bot && !chosen.is_empty() && chosen == proposal;
                 s.pick_done = true;
                 s.picking = false;
                 ctx.event(None, "best_set", json!({ "count": chosen.len() }));
@@ -716,6 +721,7 @@ pub fn pick_skip(state: &mut Value) {
 pub fn pick_propose_all(ctx: &mut KitCtx, state: &mut Value, ids: &[String]) {
     let mut s = load(state);
     s.proposed_best = ids.iter().take(BEST_MAX).cloned().collect();
+    s.proposed_by_bot = false;
     s.picking = false;
     s.pick_done = true;
     ctx.event(None, "best_proposed", json!({ "count": s.proposed_best.len(), "by": "all" }));
@@ -746,6 +752,7 @@ pub fn pick_fail(ctx: &mut KitCtx, state: &mut Value) {
     s.picking = false;
     s.pick_done = true;
     s.proposed_best.clear();
+    s.proposed_by_bot = false;
     ctx.event(None, "best_pick_failed", json!({}));
     store(state, &s);
 }
@@ -809,6 +816,7 @@ pub fn pick_propose(ctx: &mut KitCtx, state: &mut Value, ids: &Value) -> Result<
     }
     let n = out.len();
     s.proposed_best = out;
+    s.proposed_by_bot = true;
     s.picking = false;
     s.pick_done = true;
     ctx.event(None, "best_proposed", json!({ "count": n, "by": "snap" }));
@@ -1566,6 +1574,31 @@ mod tests {
         // Then a swap makes it the host's
         Wall.act(&mut ctx, &mut state, &Viewer::Host, "set_best", &json!({ "ids": swapped })).unwrap();
         assert_eq!(Wall.view(&ctx, &state, &Viewer::Host)["best_by"], "host");
+    }
+
+    #[test]
+    fn all_of_thirty_or_fewer_unchanged_is_the_hosts_not_the_bots() {
+        // copy check (Mira, 3032d327): no bot picked anything, so no holo sticker, no state-8 line
+        let ps = players();
+        let spec = json!({ "title": "W" });
+        let mut ctx = KitCtx::new(&spec, &ps, Utc::now());
+        let mut state = approved(12);
+        let ids: Vec<String> = (0..12).map(|i| format!("ph_{i}")).collect();
+        pick_propose_all(&mut ctx, &mut state, &ids);
+        assert!(!load(&state).proposed_by_bot);
+        Wall.act(&mut ctx, &mut state, &Viewer::Host, "set_best", &json!({ "ids": ids })).unwrap();
+        assert_eq!(Wall.view(&ctx, &state, &Viewer::Host)["best_by"], "host");
+        assert!(Wall.view(&ctx, &state, &Viewer::Guest("pl_0".into())).get("best_by").is_none());
+        assert!(!ctx.events.iter().any(|e| e.kind == SNAP_SHOWN_EVENT), "no state-8 line");
+        // More than 30, the bot's 30 unchanged: still the bot's
+        let mut ctx = KitCtx::new(&spec, &ps, Utc::now());
+        let mut state = picking(40);
+        let ids: Vec<String> = (0..30).map(|i| format!("ph_{i}")).collect();
+        pick_propose(&mut ctx, &mut state, &json!(ids)).unwrap();
+        assert!(load(&state).proposed_by_bot);
+        Wall.act(&mut ctx, &mut state, &Viewer::Host, "set_best", &json!({ "ids": ids })).unwrap();
+        assert_eq!(Wall.view(&ctx, &state, &Viewer::Host)["best_by"], "snap");
+        assert_eq!(ctx.events.iter().filter(|e| e.kind == SNAP_SHOWN_EVENT).count(), 1);
     }
 
     #[test]

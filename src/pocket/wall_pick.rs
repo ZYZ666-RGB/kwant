@@ -16,7 +16,8 @@
 //!   next tick, then never ([`wall::PICK_TRIES`]).
 //!
 //! Guests see nothing of it until the host's `set_best`; that the bot picked the best shown
-//! (`best_by: "snap"`) needs the proposal unchanged.
+//! (`best_by: "snap"`) needs the bot's own proposal unchanged. "30 or fewer, so all" is never
+//! the bot's: nothing picked those.
 
 use super::kits::{spec_date, KitCtx};
 use super::schedule::{self, Origin, Zone};
@@ -163,8 +164,12 @@ async fn step(state: &AppState, code: &str, now: DateTime<Utc>) -> PResult<bool>
                 origin = Origin { kwant_id: bot.id.clone(), channel_id: None, thread_id: None };
             }
             if !wall::pick_start(&mut kit_state) {
-                // Its tries are used up (a restart cut off the second one too): never again
+                // Its tries are used up (a restart cut off the second one too): never again, and
+                // the host hears it didn't work (QA F4 at 3032d327: it used to end silently)
+                wall::pick_fail(&mut ctx, &mut kit_state);
                 super::save(state, code, &kit_state, ctx, now).await?;
+                drop(guard);
+                say_failed(state, code).await;
                 return Ok(false);
             }
             // Saved (claimed) before the turn starts: another tick or a restart sees `picking`
@@ -188,8 +193,8 @@ pub fn prompt(code: &str, title: &str, approved: usize) -> String {
     format!(
         "Pick the best {best} photos from the photo wall {title:?} (pocket {code}), which closed with {approved} approved photos. \
          Look at {shown} of them{sample} with {TOOL_PHOTOS} (code \"{code}\", pages 1 to {pages}, {PAGE} a page), \
-         then call {TOOL_PROPOSE} once with code \"{code}\" and the ids of the {best} best: sharp, smiling, and not too alike. \
-         Use only ids you saw. Don't describe any photo or anyone in them, and don't comment on how people look. \
+         then call {TOOL_PROPOSE} with code \"{code}\" and the ids of the {best} best: sharp, smiling, and not too alike. \
+         Use only ids you saw. If it turns your list down, fix the list and call it again. Don't describe any photo or anyone in them, and don't comment on how people look. \
          Nothing goes to guests: the host looks your pick over first. When {TOOL_PROPOSE} says it worked, reply only \"Done.\""
     )
 }
@@ -269,24 +274,35 @@ fn clock_word(t: chrono::NaiveDateTime) -> String {
     }
 }
 
-/// Before the host said yes: the proposal is ready to look over.
-pub fn ready_copy(title: &str, n: usize, all: bool) -> (String, String) {
+/// " All the photos leave this box on Dec 28." (with its leading space), or nothing without an
+/// `expires_at`.
+fn leaves_line(leaves: Option<&str>) -> String {
+    leaves.map(|d| format!(" All the photos leave this box on {d}.")).unwrap_or_default()
+}
+
+/// Before the host said yes: the proposal is ready to look over. `all`: 30 or fewer, so all
+/// of them (no bot call). `leaves`: the pocket's `expires_at` as a local date.
+pub fn ready_copy(title: &str, n: usize, all: bool, leaves: Option<&str>) -> (String, String) {
     let t = schedule::short_title(title);
     let line = if all {
-        format!("All {n} photos from {t} are ready for you to look over as the best. Guests see them only after you say yes.")
+        format!("{t} closed with {n} photos, so all {n} are in the best. Look them over on the card; guests see them only after you say yes.")
     } else {
-        format!("The best {n} photos from {t} are ready for you to look over. Guests see them only after you say yes.")
+        format!("I picked the best {n} photos from {t}. Look them over on the card and swap any you like; guests see them only after you say yes.")
     };
-    (format!("Best photos ready: {t}"), line)
+    (format!("Best photos ready: {t}"), line + &leaves_line(leaves))
 }
 
 /// The pick didn't work: the host stars by hand.
-pub fn failed_copy(title: &str) -> (String, String) {
+pub fn failed_copy(title: &str, leaves: Option<&str>) -> (String, String) {
     let t = schedule::short_title(title);
-    (format!("Best photos not picked: {t}"), format!("I couldn't pick the best photos from {t}. You can still star your favourites on the card."))
+    let best = wall::BEST_MAX;
+    let line = format!("I couldn't pick the best {best} from {t}, so guests don't see a best set yet. You can star the best ones yourself on the card.");
+    (format!("Best photos not picked: {t}"), line + &leaves_line(leaves))
 }
 
-/// After the host showed the proposal unchanged (design.md state 8).
+/// After the host showed the bot's proposal unchanged (design.md state 8). Only the bot's own pick
+/// gets here (more than 30 approved), so there's no "all of them" line: `best` can still equal
+/// `approved` if the host hid the photos the bot left out, and the line reads right then too.
 pub fn shown_copy(approved: usize, best: usize, closed: Option<chrono::NaiveDateTime>, leaves: Option<String>, morning: bool) -> String {
     let mut line = String::new();
     if morning {
@@ -295,15 +311,8 @@ pub fn shown_copy(approved: usize, best: usize, closed: Option<chrono::NaiveDate
     if let Some(c) = closed {
         line.push_str(&format!("The wall closed at {} with {approved} photos. ", clock_word(c)));
     }
-    if best == approved {
-        line.push_str(&format!("I showed all {best} to guests as the best after you said yes."));
-    } else {
-        line.push_str(&format!("I picked the best {best} and showed them to guests after you said yes."));
-    }
-    if let Some(d) = leaves {
-        line.push_str(&format!(" All the photos leave this box on {d}."));
-    }
-    line
+    line.push_str(&format!("I picked the best {best} and showed them to guests after you said yes."));
+    line + &leaves_line(leaves.as_deref())
 }
 
 async fn zone_and_origin(state: &AppState, s: &Snapshot) -> (Zone, Option<Origin>) {
@@ -312,10 +321,15 @@ async fn zone_and_origin(state: &AppState, s: &Snapshot) -> (Zone, Option<Origin
     (zone, origin_for(s, sched.as_ref()))
 }
 
+/// The day the pocket's photos leave this box, on the person's clock (as in the state-8 line).
+fn leaves_on(zone: &Zone, s: &Snapshot) -> Option<String> {
+    s.row.expires_at.map(|t| local_date(zone, t))
+}
+
 async fn say_ready(state: &AppState, code: &str, n: usize, all: bool) {
     let Ok(Some(s)) = super::snapshot(state, code).await else { return };
-    let (_, origin) = zone_and_origin(state, &s).await;
-    let (title, line) = ready_copy(&s.row.title, n, all);
+    let (zone, origin) = zone_and_origin(state, &s).await;
+    let (title, line) = ready_copy(&s.row.title, n, all, leaves_on(&zone, &s).as_deref());
     if let Some(o) = &origin {
         schedule::post(state, o, json!({ "kind": "pocket", "reason": "best_ready", "code": code, "block": null }), line.clone()).await;
     }
@@ -324,8 +338,8 @@ async fn say_ready(state: &AppState, code: &str, n: usize, all: bool) {
 
 async fn say_failed(state: &AppState, code: &str) {
     let Ok(Some(s)) = super::snapshot(state, code).await else { return };
-    let (_, origin) = zone_and_origin(state, &s).await;
-    let (title, line) = failed_copy(&s.row.title);
+    let (zone, origin) = zone_and_origin(state, &s).await;
+    let (title, line) = failed_copy(&s.row.title, leaves_on(&zone, &s).as_deref());
     if let Some(o) = &origin {
         schedule::post(state, o, json!({ "kind": "pocket", "reason": "best_failed", "code": code, "block": null }), line.clone()).await;
     }
@@ -341,7 +355,7 @@ pub async fn say_shown(state: &AppState, code: &str) {
     let now = Utc::now();
     let (approved, best) = wall::best_counts(&s.kit_state);
     let closed = stopped_at(&s).map(|t| zone.local(t));
-    let leaves = s.row.expires_at.map(|t| local_date(&zone, t));
+    let leaves = leaves_on(&zone, &s);
     let morning = chrono::Timelike::hour(&zone.local(now)) < 12;
     let line = shown_copy(approved, best, closed, leaves, morning);
     schedule::post(state, &o, json!({ "kind": "pocket", "reason": "best_shown", "code": code, "block": null }), line).await;
@@ -515,6 +529,10 @@ mod tests {
         assert!(p.contains(TOOL_PHOTOS) && p.contains(TOOL_PROPOSE));
         assert!(p.contains("pages 1 to 9"));
         assert!(p.contains("Don't describe any photo"));
+        // copy check: no "once", so a refused list gets fixed in the same turn
+        assert!(p.contains(&format!("then call {TOOL_PROPOSE} with code")), "{p}");
+        assert!(p.contains("Use only ids you saw. If it turns your list down, fix the list and call it again."), "{p}");
+        assert!(!p.contains(" once "), "{p}");
     }
 
     #[test]
@@ -524,11 +542,34 @@ mod tests {
             shown_copy(212, 30, Some(noon), None, true),
             "Good morning! The wall closed at noon with 212 photos. I picked the best 30 and showed them to guests after you said yes."
         );
-        let l = shown_copy(24, 24, Some(noon), Some("Dec 29".into()), false);
-        assert!(l.starts_with("The wall closed at noon with 24 photos. I showed all 24"), "{l}");
-        assert!(l.ends_with("leave this box on Dec 29."), "{l}");
-        let (_, ready) = ready_copy("Mia & Jonas's wedding", 30, false);
-        assert_eq!(ready, "The best 30 photos from Mia & Jonas's wedding are ready for you to look over. Guests see them only after you say yes.");
+        assert_eq!(
+            shown_copy(212, 30, Some(noon), Some("Dec 28".into()), false),
+            "The wall closed at noon with 212 photos. I picked the best 30 and showed them to guests after you said yes. All the photos leave this box on Dec 28."
+        );
+        // Mira's copy check at 3032d327: lines 2, 3 and 5
+        let w = "Mia & Jonas's wedding";
+        let (title, ready) = ready_copy(w, 30, false, Some("Dec 28"));
+        assert_eq!(title, "Best photos ready: Mia & Jonas's wedding");
+        assert_eq!(
+            ready,
+            "I picked the best 30 photos from Mia & Jonas's wedding. Look them over on the card and swap any you like; guests see them only after you say yes. All the photos leave this box on Dec 28."
+        );
+        let (_, all) = ready_copy(w, 12, true, Some("Dec 28"));
+        assert_eq!(
+            all,
+            "Mia & Jonas's wedding closed with 12 photos, so all 12 are in the best. Look them over on the card; guests see them only after you say yes. All the photos leave this box on Dec 28."
+        );
+        let (title, failed) = failed_copy(w, Some("Dec 28"));
+        assert_eq!(title, "Best photos not picked: Mia & Jonas's wedding");
+        assert_eq!(
+            failed,
+            "I couldn't pick the best 30 from Mia & Jonas's wedding, so guests don't see a best set yet. You can star the best ones yourself on the card. All the photos leave this box on Dec 28."
+        );
+        // No expires_at: the leave sentence is dropped
+        for line in [ready_copy(w, 30, false, None).1, ready_copy(w, 12, true, None).1, failed_copy(w, None).1] {
+            assert!(!line.contains("leave this box") && line.ends_with('.'), "{line}");
+        }
+        assert!(ready_copy(w, 12, true, None).1.ends_with("only after you say yes."));
     }
 
     #[test]

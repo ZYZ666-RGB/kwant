@@ -175,8 +175,9 @@ async fn more_than_30_the_bot_picks_once_and_the_host_says_yes() {
     assert_eq!(h["best_by"], Value::Null, "nothing is shown until the host says yes");
     assert_eq!(h["budget"]["bot_calls"], 1);
     assert!(h["budget"]["line"].as_str().unwrap().starts_with("1 bot call so far"), "{}", h["budget"]);
-    let ready = wait_reply(&env, &env.a, "ready for you to look over").await;
-    assert!(ready.text.contains("The best 30 photos from Mia & Sam"), "{}", ready.text);
+    let ready = wait_reply(&env, &env.a, "guests see them only after you say yes").await;
+    assert!(ready.text.starts_with("I picked the best 30 photos from Mia & Sam. Look them over on the card"), "{}", ready.text);
+    assert!(ready.text.contains("All the photos leave this box on"), "says when the photos leave: {}", ready.text);
     assert!(!ready.text.contains("Zora") && !ready.text.contains(&w.guest), "no guest names: {}", ready.text);
 
     // Guests, the lobby and the big screen never see the proposal
@@ -233,11 +234,22 @@ async fn thirty_or_fewer_are_all_proposed_without_a_bot_call() {
     assert_eq!(ids_of(&h["proposed_best"]), w.ids, "all 12");
     assert_eq!(h["picking"], false);
     assert_eq!(h["budget"]["bot_calls"], 0);
-    let line = wait_reply(&env, &env.a, "ready for you to look over").await;
-    assert!(line.text.starts_with("All 12 photos from Mia & Sam"), "{}", line.text);
+    let line = wait_reply(&env, &env.a, "guests see them only after you say yes").await;
+    assert!(line.text.starts_with("Mia & Sam closed with 12 photos, so all 12 are in the best."), "{}", line.text);
+    assert!(line.text.contains("All the photos leave this box on"), "says when the photos leave: {}", line.text);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(turns(&w.code), 0, "no bot call");
-    // The host drops one: the host's pick
+    // The host says yes to all 12 unchanged: still the host's, since no bot picked anything
+    // (copy check at 3032d327: no holo sticker, no state-8 line)
+    pocket::act(&env.state, &w.code, &Viewer::Host, "set_best", &json!({ "ids": w.ids })).await.unwrap();
+    assert_eq!(host(&env, &w.code).await["best_by"], "host");
+    let guest = view(&env.state, &w.code, &Viewer::Guest(w.guest.clone())).await;
+    assert!(!has_key(&guest, "best_by"), "{guest}");
+    assert_eq!(guest["wall"].as_array().unwrap().iter().filter(|p| p["best"] == true).count(), 12);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let lines = common::messages(&env, &env.a).await;
+    assert!(!lines.iter().any(|m| m.text.contains("showed them to guests")), "no state-8 line");
+    // The host drops one: the host's pick too
     pocket::act(&env.state, &w.code, &Viewer::Host, "set_best", &json!({ "ids": &w.ids[1..] })).await.unwrap();
     assert_eq!(host(&env, &w.code).await["best_by"], "host");
 }
@@ -267,8 +279,9 @@ async fn fails(env: &Env, w: &Wall) {
     let at = morning_after(w.closes);
     schedule::run_once(&env.state, at).await;
     wait_for("the turn", || async { turns(&w.code) == 1 }).await;
-    let line = wait_reply(env, &env.a, "I couldn't pick the best photos").await;
-    assert!(line.text.contains("You can still star your favourites"), "{}", line.text);
+    let line = wait_reply(env, &env.a, "I couldn't pick the best 30 from Mia & Sam").await;
+    assert!(line.text.contains("You can star the best ones yourself on the card."), "{}", line.text);
+    assert!(line.text.contains("All the photos leave this box on"), "says when the photos leave: {}", line.text);
     let h = host(env, &w.code).await;
     assert_eq!(h["picking"], false);
     assert!(h["proposed_best"].as_array().is_some_and(Vec::is_empty), "{}", h["proposed_best"]);
@@ -303,6 +316,38 @@ async fn bad_ids_are_refused_and_leave_no_proposal() {
     fails(&env, &w).await;
     let o = host(&env, &other.code).await;
     assert!(o["proposed_best"].as_array().is_some_and(Vec::is_empty), "nothing reached the other wall: {o}");
+}
+
+/// A restart cut the pick off `tries` times: `picking` is left over and nothing runs here.
+async fn leave_picking(env: &Env, code: &str, tries: u64) {
+    let s = pocket::snapshot(&env.state, code).await.unwrap().unwrap();
+    let mut st = s.kit_state.clone();
+    st["picking"] = json!(true);
+    st["pick_tries"] = json!(tries);
+    st["bot_calls"] = json!(tries);
+    env.state.db.pocket_save_state(code, &st.to_string(), &[], Utc::now()).await.unwrap();
+}
+
+/// QA F4 at 3032d327: cut off twice, no third try, and the host hears it didn't work (once).
+#[tokio::test]
+async fn tries_used_up_says_it_couldnt_pick() {
+    let env = setup().await;
+    on(&env).await;
+    let w = wall_with(&env, Some(&env.a), 35).await;
+    plant(&env, &env.a, &call_tool_marker(PROPOSE, json!({ "code": w.code, "ids": &w.ids[..30] }))).await;
+    leave_picking(&env, &w.code, 2).await;
+    let at = morning_after(w.closes);
+    schedule::run_once(&env.state, at).await;
+    let line = wait_reply(&env, &env.a, "I couldn't pick the best 30 from Mia & Sam").await;
+    assert!(line.text.contains("All the photos leave this box on"), "{}", line.text);
+    schedule::run_once(&env.state, at + Duration::hours(1)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(turns(&w.code), 0, "no third try");
+    let lines = common::messages(&env, &env.a).await;
+    assert_eq!(lines.iter().filter(|m| m.text.contains("I couldn't pick the best 30")).count(), 1, "said once");
+    let h = host(&env, &w.code).await;
+    assert_eq!(h["picking"], false, "{h}");
+    assert!(ids_of(&h["proposed_best"]).is_empty());
 }
 
 #[tokio::test]
