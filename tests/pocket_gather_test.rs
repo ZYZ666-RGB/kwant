@@ -639,6 +639,14 @@ async fn answers_close_unwatched_and_everything_goes_7_days_after_the_event() {
     let r = send(&t.main, "GET", &format!("/api/pockets/{code2}"), None, &person()).await;
     let expires = DateTime::parse_from_rfc3339(r.body["pocket"]["expires_at"].as_str().unwrap()).unwrap().with_timezone(&Utc);
     assert!((expires - (now + Duration::days(12))).num_seconds().abs() < 2);
+    // The host view carries the pocket's title and deletion date, so the chat card copies it as is
+    for c in [&code, &code2] {
+        let r = send(&t.main, "GET", &format!("/api/pockets/{c}"), None, &person()).await;
+        let (p, h) = (&r.body["pocket"], &r.body["host_view"]);
+        assert_eq!(h["title"], p["title"], "{h}");
+        let at = |v: &Value| DateTime::parse_from_rfc3339(v.as_str().unwrap_or_else(|| panic!("{v}"))).unwrap();
+        assert!((at(&h["expires_at"]) - at(&p["expires_at"])).num_seconds().abs() < 1, "{} vs {}", h["expires_at"], p["expires_at"]);
+    }
 }
 
 #[tokio::test]

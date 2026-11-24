@@ -709,6 +709,11 @@ impl Gather {
     fn host_view(ctx: &KitCtx, s: &St) -> Value {
         let spec = ctx.spec;
         let mut v = Self::facts(ctx, s);
+        // The pocket's own title and deletion date (the core's `pocket.title` and
+        // `pocket.expires_at`, from the same `title()` and retention rule), so the chat card's
+        // `gather` is this view as it is. Host only: the guest page reads them from `pocket`.
+        v["title"] = json!(Gather.title(spec));
+        v["expires_at"] = json!(Gather.rules(spec).retention.expires_at(spec, None));
         match face(spec) {
             RSVP => {
                 v["counts"] = Self::rsvp_counts(s);
