@@ -417,6 +417,25 @@ impl Database {
         self.get_thread(id).await
     }
 
+    /// Deletes one thread and everything in it (pa13a: a front desk guest's conversation with the
+    /// bot, when the guest's data expires or the pocket goes). Same order as deleting a bot:
+    /// files, messages, delegations, its waits closed, its questions, then the thread.
+    pub async fn delete_thread_with_messages(&self, id: &str) -> Result<bool, DbError> {
+        let mut tx = self.pool.begin().await?;
+        for sql in [
+            "DELETE FROM attachments WHERE thread_id = ?1",
+            "DELETE FROM messages WHERE thread_id = ?1",
+            "DELETE FROM delegations WHERE thread_id = ?1",
+            "UPDATE waiting_on_person SET status = 'closed' WHERE status != 'closed' AND thread_id = ?1",
+            "DELETE FROM questions WHERE thread_id = ?1",
+        ] {
+            sqlx::query(sql).bind(id).execute(&mut *tx).await?;
+        }
+        let done = sqlx::query("DELETE FROM threads WHERE id = ?1").bind(id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(done.rows_affected() > 0)
+    }
+
     /// Moves the thread up the list when something happens in it.
     pub async fn touch_thread(&self, id: &str) -> Result<(), DbError> {
         sqlx::query("UPDATE threads SET updated_at = ? WHERE id = ?")
