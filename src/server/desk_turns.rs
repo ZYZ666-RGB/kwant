@@ -318,7 +318,7 @@ pub async fn needs_you(state: &AppState, kwants: &[Kwant]) -> Vec<(chrono::DateT
                 _ => (bot.to_string(), label, None, false),
             }
         };
-        for (guest, why, quote, at, thread) in desk::waiting_guests(&s.kit_state) {
+        for desk::WaitingGuest { guest, why, quote, at, thread } in desk::waiting_guests(&s.kit_state) {
             let thread = thread.filter(|_| live);
             let Some(p) = s.players.iter().find(|p| p.id == guest) else { continue };
             items.push((at, json!({

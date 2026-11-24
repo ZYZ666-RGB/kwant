@@ -332,7 +332,7 @@ impl Desk {
                 (at, Self::guest_row(s, p))
             })
             .collect();
-        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        rows.sort_by_key(|a| std::cmp::Reverse(a.0));
         rows.into_iter().map(|(_, v)| v).collect()
     }
 
@@ -657,16 +657,28 @@ pub fn busy_guests(state: &Value) -> Vec<String> {
     load(state).guests.into_iter().filter(|(_, g)| g.busy).map(|(id, _)| id).collect()
 }
 
-/// For the Needs-you list: each waiting guest's `(id, reason, the guest's last words ≤ 200,
-/// since when, thread)`.
-pub fn waiting_guests(state: &Value) -> Vec<(String, String, String, DateTime<Utc>, Option<String>)> {
+/// One row of the Needs-you list for a desk pocket.
+#[derive(Debug, Clone)]
+pub struct WaitingGuest {
+    pub guest: String,
+    /// The reason label shown to the host.
+    pub why: String,
+    /// The guest's last words, at most 200 characters.
+    pub quote: String,
+    /// Since when the guest has waited.
+    pub at: DateTime<Utc>,
+    pub thread: Option<String>,
+}
+
+/// For the Needs-you list: each guest waiting for the host.
+pub fn waiting_guests(state: &Value) -> Vec<WaitingGuest> {
     load(state)
         .guests
         .into_iter()
         .filter_map(|(id, g)| {
             let w = g.waiting.as_ref()?;
             let quote = g.msgs.iter().rev().find(|m| m.from == GUEST).map(|m| cut(&m.text, 200)).unwrap_or_default();
-            Some((id, w.why.clone(), quote, w.at, g.thread_id.clone()))
+            Some(WaitingGuest { guest: id, why: w.why.clone(), quote, at: w.at, thread: g.thread_id.clone() })
         })
         .collect()
 }
@@ -830,7 +842,7 @@ mod tests {
         };
         assert_eq!(note("pl_ann"), vec![HOST_AWAY.to_string()]);
         assert_eq!(note("pl_ben"), vec![HANDOFF.to_string()]);
-        let whys: Vec<String> = waiting_guests(&st).into_iter().map(|w| w.1).collect();
+        let whys: Vec<String> = waiting_guests(&st).into_iter().map(|w| w.why).collect();
         assert!(whys.contains(&"Bell had no reply it could send".to_string()), "{whys:?}");
         assert_eq!(bot_label(&spec), "Bell");
 
