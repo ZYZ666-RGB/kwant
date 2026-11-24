@@ -582,10 +582,13 @@ pub fn desk_item(at: DateTime<Utc>, mut v: Value, last_seen: Option<DateTime<Utc
     let unread = last_seen.is_none_or(|s| at > s);
     let name = v["kwant_name"].as_str().unwrap_or("").to_string();
     let id = v["id"].as_str().unwrap_or("").to_string();
-    let guest = v["guest_name"].as_str().unwrap_or("A guest");
-    let place = v["pocket_title"].as_str().unwrap_or("");
-    v["title"] = json!(format!("{guest} needs you"));
-    v["summary"] = json!(if place.is_empty() { "Guest Guide".to_string() } else { format!("{place} · Guest Guide") });
+    let title = format!("{} needs you", v["guest_name"].as_str().unwrap_or("A guest"));
+    let summary = match v["pocket_title"].as_str().unwrap_or("") {
+        "" => "Guest Guide".to_string(),
+        place => format!("{place} · Guest Guide"),
+    };
+    v["title"] = json!(title);
+    v["summary"] = json!(summary);
     v["status"] = json!("open");
     v["timestamp"] = json!(rfc3339(at));
     v["link"] = json!({"thread_id": v["thread_id"], "channel_id": v["channel_id"], "direct_kwant_id": v["direct_kwant_id"]});
