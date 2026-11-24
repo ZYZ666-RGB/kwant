@@ -59,6 +59,8 @@ tz-rs = "0.7"
 percent-encoding = "2"
 flate2 = "1"
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# pa14b: small previews of wall photos for the best-30 pick (decode + resize + JPEG, pure Rust, in memory only)
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 serde_norway = "0.9"
 pdf-extract = "0.12"
 # Bitwarden vault crypto (AES-256-CBC + HMAC, Argon2id KDF), done in process; see sandbox::bitwarden
