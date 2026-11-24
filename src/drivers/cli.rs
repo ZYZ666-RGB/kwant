@@ -2067,6 +2067,21 @@ impl Driver for CliDriver {
                 });
             }
             "vibe" => {
+                // A model Vibe can't take is refused, never swapped for Vibe's default
+                if let Some(notice) = input.model.as_deref().and_then(super::vibe::bad_model_notice) {
+                    tracing::warn!(cli = "vibe", "turn refused: its pinned model isn't a Mistral model id");
+                    let text = format!("⚠️ [{}] {notice}", input.kwant.name);
+                    let _ = event_tx.send(RuntimeEvent::TextDelta(text.clone())).await;
+                    let _ = event_tx
+                        .send(RuntimeEvent::TurnComplete {
+                            tokens: 0,
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            kwant_id: None,
+                            profile_id: None,
+                        })
+                        .await;
+                    return Ok(TurnOutput { text, reasoning: Some(self.executed_via(effort)), ..Default::default() });
+                }
                 // Vibe adds the system prompt to its own instead of replacing it
                 let run = Self::run_vibe(&bin_path, &input, &system_prompt, &effective_prompt, &event_tx).await;
                 let usage = run.as_ref().ok().and_then(|r| r.export.as_ref()).and_then(|e| e.usage);
@@ -3792,6 +3807,31 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\n
             );
             assert_eq!(out.model.as_deref(), Some("mistral-medium-3.5"));
             assert_eq!(out.tokens_used, 1230);
+        }
+
+        /// Rigel's live check: a pin Vibe's list lacks must run as given, and a name Vibe can't
+        /// take must refuse the turn, never run Vibe's default model instead.
+        #[tokio::test]
+        async fn a_vibe_turn_runs_its_pin_or_refuses_it_never_another_model() {
+            let fake = Fake::new("vibe", &format!("{RECORD}\nenv > {{dir}}/env\n{VIBE_TEXT}"));
+            let mut input = turn(false);
+            input.model = Some("ministral-3b-latest".into());
+            let out = fake.run(input).await.unwrap();
+            assert_eq!(out.text.trim(), "The card.");
+            let argv = fake.argv();
+            assert!(has_pair(&argv, "--model", "ministral-3b-latest"), "{argv:?}");
+            let env = std::fs::read_to_string(fake.path("env")).unwrap();
+            let models = env.lines().find_map(|l| l.strip_prefix("VIBE_MODELS=")).expect("the pin is defined for Vibe");
+            let models: serde_json::Value = serde_json::from_str(models).unwrap();
+            assert_eq!(models, serde_json::json!([{"name": "ministral-3b-latest", "provider": "mistral", "alias": "ministral-3b-latest"}]));
+
+            let fake = Fake::new("vibe", &format!("touch {{dir}}/ran\n{VIBE_TEXT}"));
+            let mut input = turn(false);
+            input.model = Some("mistral/ministral 3b".into());
+            let out = fake.run(input).await.unwrap();
+            assert!(out.text.contains("Mistral Vibe can't run this bot's pinned model"), "{}", out.text);
+            assert!(out.failure.is_none(), "another account would refuse it too");
+            assert!(!fake.path("ran").exists(), "Vibe never started");
         }
 
         #[tokio::test]

@@ -336,6 +336,17 @@ pub fn models(model: Option<&str>) -> Option<Value> {
     Some(json!([{ "name": model, "provider": "mistral", "alias": model }]))
 }
 
+/// The line a turn gets when its model can't be handed to Vibe ([`valid_model`]), so kwnt never
+/// runs Vibe's default model in its place. `None` for a model Vibe can take.
+pub fn bad_model_notice(model: &str) -> Option<String> {
+    (!valid_model(model)).then(|| {
+        "Mistral Vibe can't run this bot's pinned model: Vibe takes a Mistral model id of letters, digits, \
+         '.', '_' and '-', such as mistral-medium-3.5, mistral-large-4-0, mistral-small-latest or \
+         ministral-8b-latest. Pin one of those, or no model, and send the message again."
+            .to_string()
+    })
+}
+
 /// Vibe's command line for one turn, after the binary.
 pub fn args(turn: &TurnDir, model: Option<&str>) -> Vec<String> {
     let mut args = vec![
@@ -601,12 +612,36 @@ impl Export {
     }
 }
 
-/// Vibe's error codes that mean the account is out of quota or rate limited.
-const LIMIT_CODES: [&str; 3] = ["rate_limit", "model_billing_denied", "usage_limit"];
+/// Vibe's error codes for a quota or billing refusal: hold the account until the quota's reset.
+const BILLING_CODES: [&str; 2] = ["model_billing_denied", "usage_limit"];
 
-/// A refusal that should move the turn to another account: Vibe's limit codes, or any 429 or
-/// 402 (an unknown limit body counts as a limit), as quota; a bad or missing key as auth. Only
-/// for a run that did nothing (no reply, no tool call); the caller checks that.
+/// Vibe's error code for an HTTP 429.
+const RATE_LIMIT_CODE: &str = "rate_limit";
+
+/// How long a 429 without a Retry-After holds the account: a rate limit clears in about a
+/// minute, so a short hold, never the hour a spent quota gets.
+pub const RATE_LIMIT_HOLD_SECS: i64 = 5 * 60;
+
+/// The longest Retry-After honoured; a longer one is held this long, then checked again.
+const MAX_RETRY_AFTER_SECS: u64 = 24 * 60 * 60;
+
+/// Seconds from a Retry-After in Vibe's error text (`retry-after: 30`, `"retry_after": 30`,
+/// `retry after 30s`). Only seconds; anything else is `None`.
+pub fn retry_after_secs(text: &str) -> Option<u64> {
+    let lower = text.to_lowercase();
+    ["retry-after", "retry_after", "retry after"].iter().find_map(|name| {
+        let rest = &lower[lower.find(name)? + name.len()..];
+        let rest = rest.trim_start_matches(|c: char| matches!(c, ' ' | ':' | '=' | '"' | '\''));
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).take(9).collect();
+        digits.parse::<u64>().ok().map(|s| s.min(MAX_RETRY_AFTER_SECS))
+    })
+}
+
+/// A refusal that should move the turn to another account, as quota: a 402 or Vibe's billing
+/// codes (or a 429 whose body says the quota is spent) hold the account until the quota's
+/// reset, an hour when it doesn't say; any other 429 (an unknown body counts as a rate limit)
+/// holds it for its Retry-After, else [`RATE_LIMIT_HOLD_SECS`]. A bad or missing key is auth.
+/// Only for a run that did nothing (no reply, no tool call); the caller checks that.
 pub fn failover(exit_code: Option<i32>, export: Option<&Export>, stderr: &str) -> Option<crate::profiles::ProviderFailure> {
     use crate::profiles::{classify, FailClass, ProviderFailure};
     let message = export.and_then(|e| e.error_message.clone()).unwrap_or_default();
@@ -615,11 +650,17 @@ pub fn failover(exit_code: Option<i32>, export: Option<&Export>, stderr: &str) -
     let lower = text.to_lowercase();
     let now = chrono::Utc::now();
     let detail = classify::redact_detail(text.trim(), 300);
-    let limit = LIMIT_CODES.contains(&code)
-        || (exit_code == Some(2)
-            && (lower.contains("429") || lower.contains("402") || lower.contains("too many requests")));
-    if limit {
+    let billing = BILLING_CODES.contains(&code) || (exit_code == Some(2) && lower.contains("402"));
+    let rate = code == RATE_LIMIT_CODE
+        || (exit_code == Some(2) && (lower.contains("429") || lower.contains("too many requests")));
+    let spent = || matches!(classify::classify(None, &text, now), Some((FailClass::Quota, _)));
+    if billing || (rate && spent()) {
         let retry_at = classify::classify(Some(402), &text, now).and_then(|(_, at)| at);
+        return Some(ProviderFailure { class: FailClass::Quota, retry_at, detail });
+    }
+    if rate {
+        let hold = retry_after_secs(&text).map_or(RATE_LIMIT_HOLD_SECS, |s| s.max(1) as i64);
+        let retry_at = Some(now + chrono::Duration::seconds(hold));
         return Some(ProviderFailure { class: FailClass::Quota, retry_at, detail });
     }
     let auth = code == "invalid_api_key"
@@ -985,6 +1026,11 @@ mod tests {
 
     #[test]
     fn models_are_defined_only_when_vibe_lacks_them() {
+        // Any Mistral id Vibe's list lacks is defined, so a pin like ministral-3b runs as is
+        assert_eq!(
+            models(Some("ministral-3b-latest")),
+            Some(json!([{"name": "ministral-3b-latest", "provider": "mistral", "alias": "ministral-3b-latest"}]))
+        );
         assert_eq!(
             models(Some("mistral-medium-latest")),
             Some(json!([{"name": "mistral-medium-latest", "provider": "mistral", "alias": "mistral-medium-latest"}]))
@@ -1160,6 +1206,62 @@ mod tests {
         assert!(failover(Some(2), Some(&export("backend_error", "Server error '500 Internal Server Error'")), "").is_none());
         assert!(failover(Some(3), Some(&Export { outcome: Some("deadline".into()), ..Default::default() }), "").is_none());
         assert!(failover(Some(0), None, "").is_none());
+    }
+
+    /// Rigel's live check: one 429 on a free key held the engine for an hour. A 429 is a rate
+    /// limit: its Retry-After, else a short hold; only a spent quota or billing gets the hour.
+    #[test]
+    fn a_model_vibe_cant_take_is_refused_in_plain_words() {
+        for good in ["ministral-3b-latest", "mistral-medium-3.5", "codestral-latest"] {
+            assert_eq!(bad_model_notice(good), None, "{good}");
+        }
+        for bad in ["mistral/ministral-3b-latest", "a b", "--trust", "default", ""] {
+            let n = bad_model_notice(bad).unwrap_or_else(|| panic!("{bad}"));
+            assert!(n.starts_with("Mistral Vibe can't run this bot's pinned model"), "{n}");
+            assert!(n.contains("mistral-medium-3.5") && n.contains("mistral-large-4-0") && n.contains("ministral-8b-latest"), "{n}");
+        }
+    }
+
+    #[test]
+    fn a_rate_limit_holds_the_account_briefly_and_a_spent_quota_for_long() {
+        use crate::profiles::FailClass;
+        let export = |code: &str, message: &str| Export {
+            error_code: Some(code.into()).filter(|c: &String| !c.is_empty()),
+            error_message: Some(message.into()),
+            ..Default::default()
+        };
+        let held_for = |f: &crate::profiles::ProviderFailure| {
+            assert_eq!(f.class, FailClass::Quota, "a limit still moves the turn on");
+            (f.retry_at.expect("a limit always says until when") - chrono::Utc::now()).num_seconds()
+        };
+        let short = RATE_LIMIT_HOLD_SECS;
+        let long = crate::profiles::classify::DEFAULT_QUOTA_COOLDOWN_MINS * 60;
+        // A 429 without Retry-After: the short hold, from the export code or the text alone
+        let f = failover(Some(2), Some(&export("rate_limit", "Requests rate limit exceeded")), "").unwrap();
+        assert!((short - 5..=short).contains(&held_for(&f)), "{f:?}");
+        let f = failover(Some(2), None, "Error: Client error '429 Too Many Requests' for url").unwrap();
+        assert!((short - 5..=short).contains(&held_for(&f)), "{f:?}");
+        // A 429 with Retry-After: exactly that long
+        for text in ["429 Too Many Requests; retry-after: 42", "{\"retry_after\": 42}", "Retry-After 42"] {
+            let f = failover(Some(2), Some(&export("rate_limit", text)), "").unwrap();
+            assert!((37..=42).contains(&held_for(&f)), "{text}: {f:?}");
+        }
+        // A silly Retry-After is capped at a day, and 0 still holds a moment
+        let f = failover(Some(2), Some(&export("rate_limit", "retry-after: 99999999")), "").unwrap();
+        assert!(held_for(&f) <= 24 * 60 * 60, "{f:?}");
+        let f = failover(Some(2), Some(&export("rate_limit", "retry-after: 0")), "").unwrap();
+        assert!(f.retry_at.unwrap() > chrono::Utc::now() - chrono::Duration::seconds(1));
+        // A 429 whose body says the quota is spent: the long hold
+        let f = failover(Some(2), Some(&export("rate_limit", "You exceeded your current quota")), "").unwrap();
+        assert!((long - 5..=long).contains(&held_for(&f)), "{f:?}");
+        // A 402 or a billing code: the long hold, also with an unknown body
+        for (code, message) in [("model_billing_denied", "You have exceeded your plan usage"), ("usage_limit", "whatever"), ("", "HTTP 402: something new")] {
+            let f = failover(Some(2), Some(&export(code, message)), "").unwrap();
+            assert!((long - 5..=long).contains(&held_for(&f)), "{code} {message}: {f:?}");
+        }
+        assert_eq!(retry_after_secs("no hint here"), None);
+        assert_eq!(retry_after_secs("retry-after: soon"), None);
+        assert_eq!(retry_after_secs("Retry-After: 7"), Some(7));
     }
 
     #[test]

@@ -223,6 +223,12 @@ impl EngineId {
     }
 
     /// The model family it runs (`None` for Ollama).
+    /// Runs any model id its provider has, also one its list lacks: Vibe defines a pinned
+    /// model on the fly (`VIBE_MODELS`), so a pin is never swapped for another model.
+    pub fn runs_unlisted_pins(self) -> bool {
+        matches!(self, EngineId::MistralVibe)
+    }
+
     pub fn family(self) -> Option<Engine> {
         match self {
             EngineId::Claude | EngineId::AnthropicApi => Some(Engine::Claude),
@@ -1213,6 +1219,26 @@ pub fn choose_model(models: &[EngineModel], pinned: Option<&str>, tier: Tier) ->
     of_tier(tier).or(default).map(ModelChoice::of)
 }
 
+/// Pins that name a tier or a size, not a model: they still go through [`choose_model`].
+const TIER_PINS: [&str; 8] = ["fast", "balanced", "deep", "small", "medium", "large", "tiny", "default"];
+
+/// The model a turn on `engine` runs. A pin the list lacks runs as given on an engine that can
+/// run it ([`EngineId::runs_unlisted_pins`]): never another model in its place, and a name the
+/// engine can't take is refused by its driver. Otherwise [`choose_model`].
+pub fn choose_engine_model(engine: EngineId, models: &[EngineModel], pinned: Option<&str>, tier: Tier) -> Option<ModelChoice> {
+    let unlisted = pinned.map(str::trim).filter(|p| {
+        engine.runs_unlisted_pins()
+            && !p.is_empty()
+            && !TIER_PINS.contains(&p.to_lowercase().as_str())
+            && !models.iter().any(|m| m.id.eq_ignore_ascii_case(p))
+    });
+    if let Some(pin) = unlisted {
+        let tier = if engine.family() == Some(Engine::Mistral) { mistral_tier(pin) } else { tier_from_name(pin) };
+        return Some(ModelChoice { id: pin.to_string(), label: pin.to_string(), tier });
+    }
+    choose_model(models, pinned, tier)
+}
+
 /// [`choose_model`] for a turn that moved here from another engine: the model of the same
 /// tier, else of the nearest tier (Deep → Balanced → Fast), else the engine's default.
 pub fn choose_model_near(models: &[EngineModel], pinned: Option<&str>, tier: Tier) -> Option<ModelChoice> {
@@ -1653,6 +1679,33 @@ mod tests {
         assert_eq!(pick(&[], Some("gpt-5.5"), Tier::Fast).as_deref(), Some("gpt-5.5"));
         // Listed models but an unknown pin with no tier: the default
         assert_eq!(pick(&api, Some("mystery"), Tier::Fast).as_deref(), Some("claude-opus-5-5"));
+    }
+
+    /// Rigel's live check: a Vibe turn pinned to a model Vibe's list lacks (ministral-3b) ran
+    /// another model. Vibe can run any Mistral model id, so the pin now runs as given.
+    #[test]
+    fn vibe_runs_an_unlisted_pin_as_given_and_other_engines_still_pick_from_their_list() {
+        let mistral = mistral_fallback_models();
+        let vibe = |pin: Option<&str>, tier| choose_engine_model(EngineId::MistralVibe, &mistral, pin, tier);
+        let c = vibe(Some("ministral-3b-latest"), Tier::Deep).unwrap();
+        assert_eq!((c.id.as_str(), c.run_id(), c.tier), ("ministral-3b-latest", Some("ministral-3b-latest"), Some(Tier::Fast)));
+        assert_eq!(vibe(Some(" codestral-latest "), Tier::Balanced).unwrap().id, "codestral-latest");
+        // A name Vibe can't take still reaches the driver, which refuses the turn
+        assert_eq!(vibe(Some("a b"), Tier::Fast).unwrap().id, "a b");
+        // A listed pin, a tier word and no pin pick from the list as before
+        assert_eq!(vibe(Some("MISTRAL-SMALL-LATEST"), Tier::Deep).unwrap().id, "mistral-small-latest");
+        assert_eq!(vibe(Some("large"), Tier::Fast).unwrap().id, choose_model(&mistral, Some("large"), Tier::Fast).unwrap().id);
+        assert_eq!(vibe(Some("default"), Tier::Fast).unwrap().id, choose_model(&mistral, Some("default"), Tier::Fast).unwrap().id);
+        assert_eq!(vibe(None, Tier::Fast).unwrap().id, "mistral-small-latest");
+        assert_eq!(vibe(Some(""), Tier::Deep).unwrap().id, "mistral-large-latest");
+        // Every other engine keeps its own list: an unknown pin gets the default there
+        let api = vec![EngineModel::new("claude-opus-5-5", "Opus", true, Some(Tier::Deep))];
+        assert_eq!(choose_engine_model(EngineId::AnthropicApi, &api, Some("mystery"), Tier::Fast).unwrap().id, "claude-opus-5-5");
+        assert_eq!(
+            choose_engine_model(EngineId::MistralApi, &mistral, Some("ministral-3b-latest"), Tier::Fast).unwrap().id,
+            choose_model(&mistral, Some("ministral-3b-latest"), Tier::Fast).unwrap().id
+        );
+        assert!(EngineId::ALL.iter().filter(|e| e.runs_unlisted_pins()).eq([&EngineId::MistralVibe]));
     }
 
     #[test]
