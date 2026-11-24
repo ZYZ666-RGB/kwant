@@ -459,7 +459,7 @@ impl St {
         let spec = ctx.spec;
         let f = face(spec);
         let open = self.phase == OPEN;
-        let mut out: Vec<(String, String, Option<&Player>, &str, Option<usize>)> = Vec::new();
+        let mut out: Vec<Nudge> = Vec::new();
         let mut seen = BTreeSet::new();
         for p in ctx.players {
             let kind = match f {
@@ -474,7 +474,7 @@ impl St {
             if let Some(kind) = kind {
                 let k = key(&p.name);
                 seen.insert(k.clone());
-                out.push((p.name.clone(), k, Some(p), kind, self.moved.get(&p.id).map(|m| m.slot)));
+                out.push(Nudge { to: p.name.clone(), key: k, player: Some(p), kind, slot: self.moved.get(&p.id).map(|m| m.slot) });
             }
         }
         if open {
@@ -482,12 +482,12 @@ impl St {
                 let k = key(&m);
                 if seen.insert(k.clone()) {
                     let p = ctx.players.iter().find(|p| key(&p.name) == k);
-                    out.push((m, k, p, "not_answered", None));
+                    out.push(Nudge { to: m, key: k, player: p, kind: "not_answered", slot: None });
                 }
             }
         }
         out.into_iter()
-            .map(|(name, k, p, kind, slot)| {
+            .map(|Nudge { to: name, key: k, player: p, kind, slot }| {
                 let copied_at = self.copied.get(&k).copied();
                 let next = copied_at.map(|c| c + Duration::hours(NUDGE_HOURS)).filter(|n| *n > ctx.now);
                 json!({
@@ -502,6 +502,15 @@ impl St {
             })
             .collect()
     }
+}
+
+/// One person the Chaser drafts a note for, before the text is filled in.
+struct Nudge<'a> {
+    to: String,
+    key: String,
+    player: Option<&'a Player>,
+    kind: &'static str,
+    slot: Option<usize>,
 }
 
 /// A draft from the spec's template (else a plain default): `{name}`, `{title}`, `{when}`,
