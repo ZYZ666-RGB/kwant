@@ -1042,7 +1042,8 @@ mod tests {
     #[test]
     fn views_split_by_viewer() {
         let ps = players();
-        let ctx = KitCtx::new(&json!({ "title": "W" }), &ps, Utc::now());
+        let spec = json!({ "title": "W" });
+        let ctx = KitCtx::new(&spec, &ps, Utc::now());
         let state = with_photos(&[("pl_0", PENDING), ("pl_1", PENDING), ("pl_0", APPROVED), ("pl_1", HIDDEN)]);
         let ids = |v: &Value, f: &str| -> Vec<String> { v[f].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap().to_string()).collect() };
         let a = Wall.view(&ctx, &state, &Viewer::Guest("pl_0".into()));
