@@ -59,6 +59,7 @@ import { HireCard, type HireDecision } from './components/HireCard';
 import { RouteChoiceCard } from './components/RouteChoiceCard';
 import { RouteChoiceMeta, applyRouteChoice, correctRoute, isAskingReply, rerouteTargetsFor, resolveRouteChoice } from './routeChoice';
 import type { RoutineFocus } from './components/RoutinesPanel';
+import { failedRoutineToastAction, openFailedRoutine, runAgain } from './routineRunAgain';
 import { InboxNew } from './components/InboxNew';
 import { isReview, type InboxItem } from './api/inbox';
 import { inboxCount as foldedInboxCount } from './doneAway';
@@ -770,6 +771,8 @@ export const SpaceApp: React.FC<SpaceAppProps> = ({
   const openPlaceRef = useRef<(n: NotifiedChat) => boolean>(() => false);
   // A tier request or a fact dispute is decided on the board's Needs-you list.
   const openBoardForTier = () => showPage('board');
+  // routine-run-again: the routine_failed toast's Open routine lands on that routine's row in Routines.
+  const openFailedRoutineRef = useRef<(n: NotifyEvent) => Promise<unknown>>(async () => undefined);
   const showNotification = (n: NotifyEvent) => {
     // Another space's news is the shell's to show, with a way to switch there.
     if (n.space_id && n.space_id !== space.id) return;
@@ -790,7 +793,7 @@ export const SpaceApp: React.FC<SpaceAppProps> = ({
       const id = ++toastIdRef.current;
       const action =
         n.kind === 'routine_failed'
-          ? undefined
+          ? failedRoutineToastAction(() => void openFailedRoutineRef.current(n))
           : n.kind === 'skill_proposed'
             ? { label: 'Review', onClick: () => openSkillsRef.current(n.kwant_id) }
             : n.kind === 'automation_suggested'
@@ -2915,10 +2918,16 @@ export const SpaceApp: React.FC<SpaceAppProps> = ({
   };
 
   // A routine card's Edit or Pause: open Space settings → Routines at that routine.
-  const handleOpenRoutine = (id: string, mode: 'edit' | 'pause') => {
+  const handleOpenRoutine = (id: string, mode: RoutineFocus['mode']) => {
     setRoutineFocus({ id, mode, nonce: Date.now() });
     openSpaceSettings('routines');
   };
+  openFailedRoutineRef.current = (n) =>
+    openFailedRoutine(n, {
+      routines: continuityApi.routines,
+      openRoutines: () => openSpaceSettings('routines'),
+      focusRoutine: (id) => setRoutineFocus({ id, mode: 'run', nonce: Date.now() }),
+    });
   const handleBotActionDecision = async (actionId: string, d: BotActionDecision): Promise<string | void> => {
     try {
       const a = d === 'undo' ? await botActionsApi.undo(actionId) : d === 'confirm' ? await botActionsApi.confirm(actionId) : await botActionsApi.decline(actionId);
@@ -4466,6 +4475,11 @@ export const SpaceApp: React.FC<SpaceAppProps> = ({
       pickPage(st.page_key);
       setIsVmPaneOpen(true);
       return;
+    }
+    if (action === 'run_again') {
+      // routine-run-again: the routine runs again; the item leaves Needs you once the run starts.
+      // 'skipped' (a run is still going) goes back to the strip, which says so in its hint (Mira's design check).
+      return runAgain(item);
     }
     if (action === 'ask_again') {
       if (item.retry?.type !== 'approval') throw new Error('this ask has no approval to ask again');
