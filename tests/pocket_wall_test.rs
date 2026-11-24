@@ -546,6 +546,10 @@ async fn a_waiting_photo_is_its_senders_and_the_hosts_and_a_hidden_one_is_nobody
     assert_eq!(av["view"]["limits"]["mine_count"], 1);
     let r = send(&t.guest, "GET", &format!("/api/pocket/{code}/host/state?view=screen"), B::None, &tv).await;
     assert_eq!(r.body["view"]["photos"], json!([]), "{}", r.body);
+    assert_eq!(r.body["view"]["host_name"], "Oleks", "TV3 names the host");
+    let info = send(&t.guest, "GET", &format!("/api/pocket/{code}/info"), B::None, &stranger).await.body;
+    assert_eq!((info["view"]["limits"]["photo_cap_mb"].clone(), info["view"]["limits"]["per_guest_max"].clone()), (json!(15), json!(40)), "{info}");
+    assert!(info["view"]["limits"].get("mine_count").is_none() && !info.to_string().contains(&a_id), "seatless: no counts, no player ids");
 
     // Approved: everyone in the pocket, cached with a check
     assert_eq!(host_act(&t, &code, "approve", json!({ "id": id })).await.status, StatusCode::OK);

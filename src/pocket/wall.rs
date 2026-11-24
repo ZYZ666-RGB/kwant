@@ -316,12 +316,12 @@ impl Wall {
         v
     }
 
-    fn limits(ctx: &KitCtx, mine_count: u64) -> Value {
+    /// The spec's limits as anyone with the link may see them: no counts, so no seat needed.
+    fn public_limits(ctx: &KitCtx) -> Value {
         let c = caps(ctx.spec);
         json!({
             "photo_cap_mb": c.photo_bytes / MB,
             "per_guest_max": c.per_guest,
-            "mine_count": mine_count,
             "caption_max": CAPTION_MAX,
             "types": ["image/jpeg", "image/png", "image/webp"],
         })
@@ -330,7 +330,8 @@ impl Wall {
     fn guest_view(ctx: &KitCtx, s: &St, me: &str) -> Value {
         let sent = s.uploads.get(me).copied().unwrap_or(0);
         let mut v = Self::facts(ctx, s);
-        v["limits"] = Self::limits(ctx, sent);
+        v["limits"] = Self::public_limits(ctx);
+        v["limits"]["mine_count"] = json!(sent);
         // Newest first; the guest page shows 12 at a time
         v["wall"] = json!(s.photos.iter().rev().filter(|p| p.status == APPROVED).map(|p| Self::wall_photo(ctx, p, s)).collect::<Vec<_>>());
         v["mine"] = json!(s.photos.iter().rev().filter(|p| p.by == me && p.status != HIDDEN).map(Self::own_photo).collect::<Vec<_>>());
@@ -363,6 +364,7 @@ impl Wall {
             .collect();
         json!({
             "title": spec_str(ctx.spec, "title"),
+            "host_name": spec_str(ctx.spec, "host_name"),
             "state": if uploads_open(ctx, s) { "open" } else { "closed" },
             "best_set": s.best_set,
             "count": photos.len(),
@@ -573,6 +575,8 @@ impl Kit for Wall {
         let s = load(state);
         let mut v = Self::facts(ctx, &s);
         v["count"] = json!(s.photos.iter().filter(|p| p.status == APPROVED).count());
+        // So the join screen can say "up to 15 MB each, 40 each" before there's a seat
+        v["limits"] = Self::public_limits(ctx);
         v
     }
 
@@ -1075,12 +1079,34 @@ mod tests {
         assert_eq!(ids(&b, "wall"), ["ph_2"]);
         let screen = Wall.view(&ctx, &state, &Viewer::BigScreen);
         assert_eq!(ids(&screen, "photos"), ["ph_2"]);
+        assert_eq!(screen["host_name"], Value::Null, "no host_name in the spec: null, and the TV says \"the host\"");
         assert!(screen["photos"][0].get("by").is_none(), "no player id on the screen");
         let host = Wall.view(&ctx, &state, &Viewer::Host);
         assert_eq!(ids(&host, "queue"), ["ph_0", "ph_1"], "the queue oldest first");
         assert_eq!(host["counts"]["hidden"], 1);
         assert_eq!(host["counts"]["waiting"], 2);
         assert_eq!(host["queue"][0]["by_name"], "Mia Rossi");
+    }
+
+    #[test]
+    fn lobby_has_the_limits_and_the_screen_names_the_host() {
+        let ps = players();
+        let spec = json!({ "title": "W", "host_name": "Oleks", "photo_cap_mb": 20, "per_guest_max": 30 });
+        let ctx = KitCtx::new(&spec, &ps, Utc::now());
+        let state = with_photos(&[("pl_0", PENDING), ("pl_0", APPROVED)]);
+        let lobby = Wall.lobby(&ctx, &state);
+        assert_eq!(lobby["limits"]["photo_cap_mb"], 20, "the join screen can say \"up to 20 MB each\"");
+        assert_eq!(lobby["limits"]["per_guest_max"], 30);
+        assert_eq!(lobby["limits"]["caption_max"], CAPTION_MAX);
+        assert!(lobby["limits"].get("mine_count").is_none(), "no seat, so no counts of anyone's photos");
+        assert_eq!(lobby["count"], 1, "approved only");
+        let spec = json!({ "title": "W" });
+        let dflt = Wall.lobby(&KitCtx::new(&spec, &ps, Utc::now()), &state);
+        assert_eq!((dflt["limits"]["photo_cap_mb"].clone(), dflt["limits"]["per_guest_max"].clone()), (json!(PHOTO_CAP_MB), json!(PER_GUEST_MAX)), "defaults when the spec sets none");
+        let screen = Wall.view(&ctx, &state, &Viewer::BigScreen);
+        assert_eq!(screen["host_name"], "Oleks");
+        let guest = Wall.view(&ctx, &state, &Viewer::Guest("pl_0".into()));
+        assert_eq!((guest["limits"]["photo_cap_mb"].clone(), guest["limits"]["per_guest_max"].clone(), guest["limits"]["mine_count"].clone()), (json!(20), json!(30), json!(0)), "the seat's view keeps its own count");
     }
 
     #[test]
