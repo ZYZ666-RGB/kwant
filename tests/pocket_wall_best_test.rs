@@ -314,8 +314,12 @@ async fn bad_ids_are_refused_and_leave_no_proposal() {
     ids.push(other.ids[0].clone());
     plant(&env, &env.a, &call_tool_marker(PROPOSE, json!({ "code": w.code, "ids": ids }))).await;
     fails(&env, &w).await;
+    // The other wall closed too, so the same tick gave it its own pick (1 approved: all of it,
+    // no bot call). The refused list put nothing there: only its own photo, nothing starred.
     let o = host(&env, &other.code).await;
-    assert!(o["proposed_best"].as_array().is_some_and(Vec::is_empty), "nothing reached the other wall: {o}");
+    assert_eq!(ids_of(&o["proposed_best"]), other.ids, "nothing reached the other wall: {o}");
+    assert!(ids_of(&o["best"]).is_empty(), "{o}");
+    assert_eq!(o["budget"]["bot_calls"], 0, "{o}");
 }
 
 /// A restart cut the pick off `tries` times: `picking` is left over and nothing runs here.
