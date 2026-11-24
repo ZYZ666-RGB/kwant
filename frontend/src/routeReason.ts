@@ -135,8 +135,11 @@ export function routeLineWhy(r: RouteReasonInput & { mode?: string }): string | 
   if (picked) return picked;
   const terms = (r.matchedTerms ?? []).filter(Boolean).slice(0, 4);
   const mentions = terms.length ? `Your message mentions ${terms.join(', ')}.` : null;
+  const named = /\bwas (named|@mentioned)\b/i.test(r.reason ?? '');
   if (r.mode === 'discuss' || r.basis === 'discuss') return 'This needs several points of view.';
   switch (r.basis) {
+    case 'last':
+      return 'No role was named, so the bot that spoke last carries on.';
     case 'lead':
       return 'No one’s role matched this.';
     case 'several':
@@ -146,9 +149,10 @@ export function routeLineWhy(r: RouteReasonInput & { mode?: string }): string | 
     case 'only':
       return null;
     case 'skills':
+      if (named) return 'You named them in your message.';
       return mentions ?? 'Their role fits this.';
     case 'keywords':
-      if (/\bwas named\b/i.test(r.reason ?? '')) return 'You named them in your message.';
+      if (named) return 'You named them in your message.';
       return mentions ?? 'Words in your message matched their role.';
   }
   if (r.fallback) return mentions ?? 'Words in your message matched their role.';

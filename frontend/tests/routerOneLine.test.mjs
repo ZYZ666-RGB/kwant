@@ -55,6 +55,9 @@ const LINES = [
   { case: 'ask', basis: 'ask', line: 'Sent to Quant, Quant Researcher', why: 'You picked Quant.' },
   { case: 'handback', basis: 'handback', reason: 'Risk handed this back (not my area), so Quant takes it', line: 'Sent to Quant, Quant Researcher', why: 'Risk said it’s not their area, so Quant took it.' },
   { case: 'discuss', basis: 'discuss', mode: 'discuss', reason: 'This needs several perspectives — starting a 4-turn team discussion led by Quant', line: 'Team discussion led by Quant', why: 'This needs several points of view.' },
+  { case: 'last', basis: 'last', reason: 'Nothing in your message named a role, so Quant (Quant Researcher), who spoke last here, carries on', line: 'Sent to Quant, Quant Researcher', why: 'No role was named, so the bot that spoke last carries on.' },
+  { case: 'last + fallback', basis: 'last', fallback: true, reason: `Nothing in your message named a role, so Quant (Quant Researcher), who spoke last here, carries on. ${OFFLINE}`, line: 'Sent to Quant, Quant Researcher', why: 'No role was named, so the bot that spoke last carries on.' },
+  { case: 'skills, named', basis: 'skills', matchedTerms: ['quant'], reason: 'Quant was named in your message', line: 'Sent to Quant, Quant Researcher', why: 'You named them in your message.' },
   { case: 'keywords fallback', basis: 'keywords', fallback: true, matchedTerms: ['strategy', 'go'], reason: `Quant (Quant Researcher) does this kind of work: your message mentions strategy, go. ${OFFLINE}`, line: 'Sent to Quant, Quant Researcher', why: 'Your message mentions strategy, go.' },
 ];
 
@@ -146,7 +149,9 @@ test('deciding: one line with three dots, no chip wall', () => {
 
 test('reduced motion: every animation in the line is motion-safe only', () => {
   const src = readFileSync(new URL('../src/components/ChatView.tsx', import.meta.url), 'utf8');
-  const card = src.slice(src.indexOf('export const LayaRoutingCard'), src.indexOf("/** True below Tailwind's sm breakpoint"));
+  const start = src.indexOf('export const LayaRoutingCard');
+  const card = src.slice(start, src.indexOf('\n};\n', start) + 3);
+  assert.ok(start > 0 && card.length < 12000, 'the slice is the card only');
   const anim = card.match(/[\w:-]*animate-[\w[\]-]+/g) ?? [];
   assert.ok(anim.length >= 3, 'pulse, dots and the 160 ms fade are there');
   for (const a of anim) assert.match(a, /^motion-safe:/, `${a} is static under reduced motion`);
