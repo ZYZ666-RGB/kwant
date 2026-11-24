@@ -112,9 +112,10 @@ fn valid_tool_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 200 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// A model name Vibe gets on its command line and in `VIBE_MODELS`.
+/// A model name Vibe gets on its command line and in `VIBE_MODELS`. It starts with a letter or
+/// digit, so it can never be read as a flag (`--trust`, `-y`) or a hidden/relative name.
 pub fn valid_model(model: &str) -> bool {
-    !model.is_empty()
+    model.starts_with(|c: char| c.is_ascii_alphanumeric())
         && model.len() <= 64
         && model != "default"
         && model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
@@ -968,6 +969,17 @@ mod tests {
         assert_eq!(short[0]["startup_timeout_sec"], 30);
         assert_eq!(short[0]["tool_timeout_sec"], 330);
         assert_eq!(mcp_servers(None, 0), json!([]));
+    }
+
+    #[test]
+    fn a_model_name_is_never_a_flag() {
+        for ok in ["mistral-medium-latest", "mistral-medium-3.5", "devstral_2", "1b"] {
+            assert!(valid_model(ok), "{ok}");
+        }
+        let long = "m".repeat(65);
+        for bad in ["--trust", "-y", "--model", "-", ".hidden", "_x", "", "default", "a b", "x;rm", "a\"b", long.as_str()] {
+            assert!(!valid_model(bad), "{bad}");
+        }
     }
 
     #[test]
