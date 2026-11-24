@@ -72,8 +72,11 @@ pub fn outsider_note(name: &str, w: &NoteWords, never: &[String], facts: Option<
 pub fn handoff_reason(reply: &str, max_chars: usize) -> Option<String> {
     let line = reply.lines().map(str::trim).find(|l| l.starts_with(HANDOFF_MARK))?;
     let why: String = line[HANDOFF_MARK.len()..].trim().trim_start_matches([':', '-', '—']).trim().chars().take(max_chars).collect();
-    Some(if why.is_empty() { "The bot asked for a person to reply.".into() } else { why })
+    Some(if why.is_empty() { ASKED_FOR_PERSON.into() } else { why })
 }
+
+/// [`handoff_reason`] when the reply gave none.
+pub const ASKED_FOR_PERSON: &str = "The bot asked for a person to reply.";
 
 /// Lines that point into kwant (its address, its API, its links) never go to an outsider.
 pub fn points_into_kwant(line: &str, app_url: Option<&str>) -> bool {

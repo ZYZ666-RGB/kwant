@@ -93,7 +93,7 @@ async fn worker(state: &AppState, code: &str, guest: &str) -> bool {
     loop {
         let Ok(taken) = pocket::server_event(state, code, "take", &json!({ "guest": guest })).await else { return false };
         if taken["capped"] == json!(true) {
-            told_host(state, code, guest).await;
+            capped_tell(state, code, guest).await;
         }
         let texts: Vec<String> = taken["texts"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
         if texts.is_empty() {
@@ -111,8 +111,9 @@ async fn run_one(state: &AppState, code: &str, guest: &str, texts: Vec<String>, 
     let Ok(Some(s)) = pocket::snapshot(state, code).await else { return false };
     let Some(player) = s.players.iter().find(|p| p.id == guest).cloned() else { return false };
     let bot = s.spec["answer_bot"].as_str().unwrap_or("");
+    let label = desk::bot_label(&s.spec);
     let Ok(Some(kwant)) = state.db.get_kwant(bot).await else {
-        let _ = pocket::server_event(state, code, "handoff", &json!({ "guest": guest, "why": "The bot that answers guests was deleted." })).await;
+        let _ = hand_off(state, code, guest, &no_reply_why(&label, NoReply::BotGone), desk::HOST_AWAY).await;
         let _ = pocket::server_event(state, code, "idle", &json!({ "guest": guest })).await;
         return false;
     };
@@ -143,16 +144,16 @@ async fn run_one(state: &AppState, code: &str, guest: &str, texts: Vec<String>, 
     };
     let step = match result {
         Ok(reply) => match outsider::handoff_reason(&reply, desk::REASON_MAX) {
-            Some(why) => hand_off(state, code, guest, &why).await,
+            Some(why) => hand_off(state, code, guest, &asked_why(&label, why), desk::HANDOFF).await,
             None => {
                 let app_url = outsider::app_url(state, &kwant.space_id).await;
                 match outsider::plain_reply(&reply, app_url.as_deref()) {
                     Some(out) => pocket::server_event(state, code, "answer", &json!({ "guest": guest, "text": out })).await.map(|_| ()),
-                    None => hand_off(state, code, guest, "The bot's reply had nothing it could send.").await,
+                    None => hand_off(state, code, guest, &no_reply_why(&label, NoReply::Empty), desk::HOST_AWAY).await,
                 }
             }
         },
-        Err(_) => hand_off(state, code, guest, "The bot couldn't answer this message.").await,
+        Err(_) => hand_off(state, code, guest, &no_reply_why(&label, NoReply::Failed), desk::HOST_AWAY).await,
     };
     match step {
         Ok(()) => true,
@@ -169,17 +170,57 @@ async fn run_one(state: &AppState, code: &str, guest: &str, texts: Vec<String>, 
 async fn open_thread(state: &AppState, code: &str, guest: &str, kwant: &Kwant, name: &str) -> Option<String> {
     let thread = state.db.create_thread(&kwant.id, name, "chat", None, SOURCE).await.ok()?;
     let _ = state.event_sender.send(RuntimeEvent::ThreadUpdated { thread: serde_json::to_value(&thread).unwrap_or(Value::Null) });
-    if pocket::server_event(state, code, "thread", &json!({ "guest": guest, "thread_id": thread.id })).await.is_err() {
+    let kept = pocket::server_event(state, code, "thread", &json!({ "guest": guest, "thread_id": thread.id })).await;
+    let kept = kept.ok().and_then(|v| v["thread_id"].as_str().map(str::to_string));
+    // Not kept (the guest or pocket went), or another thread for this guest came first
+    if kept.as_deref() != Some(thread.id.as_str()) {
         let _ = state.db.delete_thread_with_messages(&thread.id).await;
-        return None;
     }
-    Some(thread.id)
+    kept
 }
 
-/// The bot can't or mustn't answer: the guest gets the `handoff` note, the host a Needs-you item
-/// and a notification.
-async fn hand_off(state: &AppState, code: &str, guest: &str, why: &str) -> pocket::PResult<()> {
-    pocket::server_event(state, code, "handoff", &json!({ "guest": guest, "why": why })).await?;
+/// Why no reply reached the guest, as the host's short label (title of the Allow card, the label
+/// on the guest row): the bot's name and no full stop.
+#[derive(Clone, Copy)]
+enum NoReply {
+    BotGone,
+    Empty,
+    Failed,
+}
+
+fn no_reply_why(bot: &str, why: NoReply) -> String {
+    match why {
+        NoReply::BotGone => format!("{bot} was deleted, so no bot is answering"),
+        NoReply::Empty => format!("{bot} had no reply it could send"),
+        NoReply::Failed => format!("{bot} couldn't answer this message"),
+    }
+}
+
+/// The bot's own `[[person]]` reason; the desk's label when it gave none (Telegram keeps
+/// [`outsider::ASKED_FOR_PERSON`]).
+fn asked_why(bot: &str, why: String) -> String {
+    if why == outsider::ASKED_FOR_PERSON { format!("{bot} asked you to reply") } else { why }
+}
+
+/// Past the daily cap: the guest gets their thread if they have none yet, so the host's reply is
+/// kept in it, then the host is told.
+async fn capped_tell(state: &AppState, code: &str, guest: &str) {
+    if let Ok(Some(s)) = pocket::snapshot(state, code).await {
+        if desk::thread_of(&s.kit_state, guest).is_none() {
+            let bot = s.spec["answer_bot"].as_str().unwrap_or("");
+            if let (Some(p), Ok(Some(k))) = (s.players.iter().find(|p| p.id == guest), state.db.get_kwant(bot).await) {
+                let _ = open_thread(state, code, guest, &k, &p.name).await;
+            }
+        }
+    }
+    told_host(state, code, guest).await;
+}
+
+/// The bot can't or mustn't answer: the guest gets `note` ([`desk::HANDOFF`] for the bot's own
+/// `[[person]]`, [`desk::HOST_AWAY`] when no reply came), the host a Needs-you item and a
+/// notification.
+async fn hand_off(state: &AppState, code: &str, guest: &str, why: &str, note: &str) -> pocket::PResult<()> {
+    pocket::server_event(state, code, "handoff", &json!({ "guest": guest, "why": why, "note": note })).await?;
     told_host(state, code, guest).await;
     Ok(())
 }
@@ -189,17 +230,23 @@ async fn hand_off(state: &AppState, code: &str, guest: &str, why: &str) -> pocke
 async fn told_host(state: &AppState, code: &str, guest: &str) {
     let Ok(Some(s)) = pocket::snapshot(state, code).await else { return };
     let Some(player) = s.players.iter().find(|p| p.id == guest) else { return };
-    let Ok(Some(kwant)) = state.db.get_kwant(s.spec["answer_bot"].as_str().unwrap_or("")).await else { return };
+    let bot = s.spec["answer_bot"].as_str().unwrap_or("");
+    // A deleted bot still tells the host (that's when they most need it): the spec's bot name, the
+    // pocket owner's space when it has one, and no thread (it went with the bot)
+    let (kwant_id, kwant_name, thread_id) = match state.db.get_kwant(bot).await {
+        Ok(Some(k)) => (k.id, k.name, desk::thread_of(&s.kit_state, guest)),
+        _ => (s.row.owner_kwant_id.clone().filter(|o| !o.is_empty()).unwrap_or_else(|| bot.to_string()), desk::bot_label(&s.spec), None),
+    };
     super::continuity::notify(
         state,
         super::continuity::Notification {
             kind: "question_asked",
-            kwant_id: kwant.id.clone(),
-            kwant_name: kwant.name.clone(),
+            kwant_id,
+            kwant_name,
             channel_id: None,
             title: format!("{} needs you", player.name),
             body: format!("A guest on {} is waiting for your reply.", s.row.title),
-            thread_id: desk::thread_of(&s.kit_state, guest),
+            thread_id,
             card_id: None,
         },
     )
@@ -214,7 +261,9 @@ pub async fn after_act(state: &AppState, code: &str, actor: &Viewer, name: &str,
             let Ok(Some(s)) = pocket::snapshot(state, code).await else { return };
             let at = desk::last_message_at(&s.kit_state, guest);
             if at.is_some_and(|at| desk::capped_at(&s.kit_state, guest, at)) {
-                told_host(state, code, guest).await;
+                // Off the pocket's lock: opening the guest's thread is an event on this pocket
+                let (state, code, guest) = (state.clone(), code.to_string(), guest.clone());
+                tokio::spawn(async move { capped_tell(&state, &code, &guest).await });
             } else if desk::busy_guests(&s.kit_state).iter().any(|g| g == guest) {
                 kick(state, code, guest);
             }
@@ -254,8 +303,23 @@ pub async fn needs_you(state: &AppState, kwants: &[Kwant]) -> Vec<(chrono::DateT
     for code in state.db.pocket_codes_open_of_kit(desk::ID).await.unwrap_or_default() {
         let Ok(Some(s)) = pocket::snapshot(state, &code).await else { continue };
         let bot = s.spec["answer_bot"].as_str().unwrap_or("");
-        let Some(kwant) = kwants.iter().find(|k| k.id == bot) else { continue };
+        // (bot id, name, a live bot to open, whether the guest's thread still exists)
+        let (kwant_id, kwant_name, direct, live) = if let Some(k) = kwants.iter().find(|k| k.id == bot) {
+            (k.id.clone(), k.name.clone(), Some(k.id.clone()), true)
+        } else if matches!(state.db.get_kwant(bot).await, Ok(Some(_))) {
+            continue; // another space's bot
+        } else {
+            // The bot is gone: its guests still wait, in the owner bot's space, or in every space
+            // when the pocket has no owner bot left
+            let label = desk::bot_label(&s.spec);
+            match s.row.owner_kwant_id.as_deref().filter(|o| !o.is_empty()) {
+                Some(o) if kwants.iter().any(|k| k.id == o) => (bot.to_string(), label, Some(o.to_string()), false),
+                Some(o) if matches!(state.db.get_kwant(o).await, Ok(Some(_))) => continue,
+                _ => (bot.to_string(), label, None, false),
+            }
+        };
         for (guest, why, quote, at, thread) in desk::waiting_guests(&s.kit_state) {
+            let thread = thread.filter(|_| live);
             let Some(p) = s.players.iter().find(|p| p.id == guest) else { continue };
             items.push((at, json!({
                 "kind": "pocket_desk",
@@ -267,10 +331,10 @@ pub async fn needs_you(state: &AppState, kwants: &[Kwant]) -> Vec<(chrono::DateT
                 "text": why,
                 "quote": quote,
                 "asked_at": at,
-                "kwant_id": kwant.id,
-                "kwant_name": kwant.name,
+                "kwant_id": kwant_id,
+                "kwant_name": kwant_name,
                 "channel_id": null,
-                "direct_kwant_id": kwant.id,
+                "direct_kwant_id": direct,
                 "thread_id": thread,
                 "follow_up_at": null,
                 "reminded_at": null,
@@ -292,5 +356,17 @@ mod tests {
         assert!(n.contains("- Share prices\n- Confirm a booking"), "{n}");
         assert!(n.contains("The host's facts (the house guide):\nWi-Fi: sea123"), "{n}");
         assert!(n.contains("that the host will reply"), "{n}");
+    }
+
+    #[test]
+    fn hand_off_labels_name_the_bot_and_have_no_full_stop() {
+        assert_eq!(no_reply_why("Bell", NoReply::BotGone), "Bell was deleted, so no bot is answering");
+        assert_eq!(no_reply_why("Bell", NoReply::Empty), "Bell had no reply it could send");
+        assert_eq!(no_reply_why("The bot", NoReply::Failed), "The bot couldn't answer this message");
+        assert_eq!(asked_why("Bell", outsider::ASKED_FOR_PERSON.into()), "Bell asked you to reply");
+        assert_eq!(asked_why("Bell", "Late check-out: 2 PM".into()), "Late check-out: 2 PM");
+        assert_eq!(desk::bot_label(&json!({ "bot": { "name": " Bell " } })), "Bell");
+        assert_eq!(desk::bot_label(&json!({ "bot": { "name": "" } })), "The bot");
+        assert_eq!(desk::bot_label(&json!({})), "The bot");
     }
 }

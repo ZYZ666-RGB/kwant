@@ -55,6 +55,12 @@ pub const NOTE: &str = "note";
 
 pub const HANDOFF: &str = "handoff";
 pub const CAPPED: &str = "daily_cap";
+/// The note when no reply came at all (the bot is gone, had nothing it could send, or its turn
+/// failed): the guest page says the bot can't answer and the host has the message. The bot's own
+/// `[[person]]` gets [`HANDOFF`].
+pub const HOST_AWAY: &str = "host_away";
+/// The host's label for a guest waiting past the daily cap (Mira's card chip, state 8).
+pub const CAP_WHY: &str = "Daily limit reached";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct St {
@@ -169,6 +175,13 @@ pub fn guide(spec: &Value) -> &str {
     spec_str(spec, "guide")
 }
 
+/// The answering bot's name as the host knows it, from the spec (kept after the bot is deleted);
+/// "The bot" when it has none.
+pub fn bot_label(spec: &Value) -> String {
+    let name = spec["bot"]["name"].as_str().unwrap_or("").trim();
+    if name.is_empty() { "The bot".into() } else { name.to_string() }
+}
+
 fn starters(spec: &Value) -> Vec<String> {
     spec.get("starters").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(|s| s.trim().to_string()).collect()).unwrap_or_default()
 }
@@ -217,7 +230,7 @@ impl St {
             g.pending.clear();
             g.busy = false;
             if g.waiting.is_none() {
-                g.waiting = Some(Waiting { reason: CAPPED.into(), why: "Over today's bot replies".into(), at: now });
+                g.waiting = Some(Waiting { reason: CAPPED.into(), why: CAP_WHY.into(), at: now });
             }
             if g.cap_note_day.as_deref() == Some(today.as_str()) {
                 false
@@ -569,9 +582,13 @@ impl Kit for Desk {
                 }
             }
             "thread" => {
+                // The first thread wins: a second one opened at the same time is the caller's to drop
                 let t = body.get("thread_id").and_then(Value::as_str).unwrap_or("");
-                s.guests.entry(pid).or_default().thread_id = Some(t.to_string()).filter(|t| !t.is_empty());
-                json!({})
+                let g = s.guests.entry(pid).or_default();
+                if g.thread_id.is_none() {
+                    g.thread_id = Some(t.to_string()).filter(|t| !t.is_empty());
+                }
+                json!({ "thread_id": g.thread_id })
             }
             "answer" => {
                 let text = cut(body.get("text").and_then(Value::as_str).unwrap_or("").trim(), REPLY_MAX);
@@ -582,7 +599,8 @@ impl Kit for Desk {
             }
             "handoff" => {
                 let why = cut(body.get("why").and_then(Value::as_str).unwrap_or("").trim(), REASON_MAX);
-                s.push(&pid, NOTE, String::new(), ctx.now, None, Some(HANDOFF));
+                let note = if body.get("note").and_then(Value::as_str) == Some(HOST_AWAY) { HOST_AWAY } else { HANDOFF };
+                s.push(&pid, NOTE, String::new(), ctx.now, None, Some(note));
                 s.guests.entry(pid).or_default().waiting = Some(Waiting { reason: HANDOFF.into(), why, at: ctx.now });
                 json!({})
             }
@@ -793,6 +811,34 @@ mod tests {
         assert_eq!(Desk.owned_threads(&st), vec!["th1".to_string()]);
         Desk.on_remove(&mut KitCtx::new(&spec, &ps, now), &mut st, "pl_ann");
         assert!(Desk.owned_threads(&st).is_empty());
+    }
+
+    #[test]
+    fn a_hand_off_with_no_reply_says_host_away_and_the_first_thread_wins() {
+        let now = Utc::now();
+        let ps = players(now);
+        let spec = spec();
+        let mut st = Desk.init(&spec);
+        let mut ctx = KitCtx::new(&spec, &ps, now);
+        say(&mut st, &mut ctx, "pl_ann", "hi").unwrap();
+        Desk.server_event(&mut ctx, &mut st, "handoff", &json!({ "guest": "pl_ann", "why": "Bell had no reply it could send", "note": HOST_AWAY })).unwrap();
+        say(&mut st, &mut ctx, "pl_ben", "hi").unwrap();
+        Desk.server_event(&mut ctx, &mut st, "handoff", &json!({ "guest": "pl_ben", "why": "Late check-out" })).unwrap();
+        let note = |who: &str| {
+            let v = Desk.view(&ctx, &st, &Viewer::Guest(who.into()));
+            v["messages"].as_array().unwrap().iter().filter_map(|m| m["note"].as_str().map(str::to_string)).collect::<Vec<_>>()
+        };
+        assert_eq!(note("pl_ann"), vec![HOST_AWAY.to_string()]);
+        assert_eq!(note("pl_ben"), vec![HANDOFF.to_string()]);
+        let whys: Vec<String> = waiting_guests(&st).into_iter().map(|w| w.1).collect();
+        assert!(whys.contains(&"Bell had no reply it could send".to_string()), "{whys:?}");
+        assert_eq!(bot_label(&spec), "Bell");
+
+        let t = Desk.server_event(&mut ctx, &mut st, "thread", &json!({ "guest": "pl_ann", "thread_id": "th1" })).unwrap();
+        assert_eq!(t["thread_id"], json!("th1"));
+        let t = Desk.server_event(&mut ctx, &mut st, "thread", &json!({ "guest": "pl_ann", "thread_id": "th2" })).unwrap();
+        assert_eq!(t["thread_id"], json!("th1"), "the second opener drops its own");
+        assert_eq!(thread_of(&st, "pl_ann").as_deref(), Some("th1"));
     }
 
     #[test]

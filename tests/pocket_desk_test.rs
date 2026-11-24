@@ -18,6 +18,7 @@ use futures::StreamExt;
 use kwnt::db::spaces::SpaceId;
 use kwnt::drivers::CUSTOMER_NOTE;
 use kwnt::pocket::{self, guest, listener};
+use kwnt::RuntimeEvent;
 use serde_json::{json, Value};
 use std::time::Duration as StdDuration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -418,6 +419,7 @@ async fn over_the_daily_cap_the_guest_waits_for_the_host_without_a_model_call() 
     assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(items[0]["guest_id"], ann.as_str());
     assert_eq!(items[0]["pocket_code"], code.as_str());
+    assert_eq!(items[0]["text"], "Daily limit reached");
 
     // The host answers by hand; the item goes
     let r = host_act(&d, &code, &host, "reply", json!({ "guest": ann, "text": "Yes, 2 PM is fine." })).await;
@@ -425,6 +427,23 @@ async fn over_the_daily_cap_the_guest_waits_for_the_host_without_a_model_call() 
     wait_msg(&d, &code, &key, "host", "Yes, 2 PM is fine.").await;
     assert_eq!(state_of(&d, &code, &key).await["view"]["waiting_for_host"], false);
     assert!(desk_items(&d).await.is_empty());
+
+    // A guest whose very first message is over the cap gets a thread too, so the host's reply is kept
+    let (ben, ben_key) = joined(&d, &code, "Ben").await;
+    let r = say(&d, &code, &ben_key, "Is there parking? CAPOVER13 REPLYTAG:capover13").await;
+    assert_eq!(r.body["view"]["waiting_for_host"], true, "{}", r.body);
+    common::wait_for("Ben's item with a thread", || async { desk_items(&d).await.iter().any(|i| i["guest_id"] == ben.as_str() && i["thread_id"].is_string()) }).await;
+    let item = desk_items(&d).await.into_iter().find(|i| i["guest_id"] == ben.as_str()).unwrap();
+    let thread = item["thread_id"].as_str().unwrap().to_string();
+    let r = host_act(&d, &code, &host, "reply", json!({ "guest": ben, "text": "Yes, in the yard." })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    common::wait_for("the host's reply in Ben's thread", || {
+        let db = d.env.state.db.clone();
+        let thread = thread.clone();
+        async move { db.list_messages(&thread, 100).await.unwrap().iter().any(|m| m.sender_id == "user" && m.text == "Yes, in the yard.") }
+    })
+    .await;
+    assert!(invocations_with("CAPOVER13").is_empty(), "over the cap made a model call");
 }
 
 // ---- Hand-off ----
@@ -489,6 +508,51 @@ async fn a_hand_off_reaches_the_host_and_the_hosts_reply_reaches_only_that_guest
     common::wait_for("Ben's item", || async { desk_items(&d).await.len() == 1 }).await;
     let r = host_act(&d, &code, &host, "resolve", json!({ "guest": ben })).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(desk_items(&d).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_deleted_bot_still_tells_the_host_and_the_guest_hears_the_host_has_it() {
+    let d = setup().await;
+    let (code, host) = desk(&d, json!({})).await;
+    let (ann, key) = joined(&d, &code, "Ann").await;
+    let (_, read) = call(&d.env.app, "GET", &format!("/api/pockets/{code}"), None).await;
+    let bot = read["summary"]["answer_bot"]["name"].as_str().expect("the bot's name").to_string();
+    let (s, v) = call(&d.env.app, "DELETE", &format!("/api/kwants/{}", d.env.a), None).await;
+    assert!(s.is_success(), "{s} {v}");
+    let mut rx = d.env.state.event_sender.subscribe();
+
+    let r = say(&d, &code, &key, "Where are the keys? GONE13").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    common::wait_for("the host_away note", || async { msgs(&state_of(&d, &code, &key).await).iter().any(|m| m["note"] == "host_away") }).await;
+    let s = state_of(&d, &code, &key).await;
+    assert!(!msgs(&s).iter().any(|m| m["note"] == "handoff"), "no reply came, so not the hand-off note: {s}");
+    assert_eq!(s["view"]["waiting_for_host"], true);
+    assert!(!s.to_string().contains("was deleted"), "the reason is for the host: {s}");
+    assert!(invocations_with("GONE13").is_empty());
+
+    // Needs you still lists the guest, under the bot's name, with a short label
+    let items = desk_items(&d).await;
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["text"], format!("{bot} was deleted, so no bot is answering"));
+    assert_eq!(items[0]["kwant_name"], bot.as_str());
+    assert!(items[0]["thread_id"].is_null(), "{items:?}");
+
+    // And the host gets a notification, without the guest's words
+    let mut notified = false;
+    while let Ok(e) = rx.try_recv() {
+        if let RuntimeEvent::Notify { kind, title, body, .. } = e.unscoped() {
+            if kind == "question_asked" && title.contains("Ann needs you") {
+                assert!(!body.contains("GONE13") && !body.contains("keys"), "{body}");
+                notified = true;
+            }
+        }
+    }
+    assert!(notified, "the host was told");
+
+    let r = host_act(&d, &code, &host, "reply", json!({ "guest": ann, "text": "In the blue box." })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    wait_msg(&d, &code, &key, "host", "In the blue box.").await;
     assert!(desk_items(&d).await.is_empty());
 }
 
