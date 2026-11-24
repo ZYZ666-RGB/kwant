@@ -506,12 +506,12 @@ export const LayaRoutingCard: React.FC<{ routing: RoutingState; spaceName?: stri
     'inline-flex items-center min-h-[44px] -my-3 px-1.5 rounded-md text-sky-300 font-medium hover:text-sky-200 md:min-h-0 md:my-0 md:py-0.5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400 focus-visible:outline-offset-2';
 
   return (
-    <div className="flex flex-col items-start w-full max-w-5xl pl-1 text-[13px] leading-5 text-zinc-400" data-route-line aria-live="polite">
-      <div className="flex items-center gap-x-2 gap-y-1 flex-wrap min-w-0">
+    <div className="flex flex-col items-start w-full max-w-5xl pl-1 text-[13px] leading-5 text-zinc-400" data-route-line>
+      <div className="flex items-center gap-x-2 gap-y-1 flex-wrap min-w-0" aria-live="polite">
         <Sparkles size={14} aria-hidden="true" className={`text-sky-300 flex-shrink-0 ${deciding ? 'motion-safe:animate-pulse' : ''}`} />
         {deciding ? (
           <span className="inline-flex items-center gap-1.5">
-            <span>Choosing who answers…</span>
+            <span>Choosing who answers</span>
             <span className="inline-flex gap-0.5" aria-hidden="true">
               {[0, 1, 2].map((i) => (
                 <span key={i} className="w-1 h-1 rounded-full bg-sky-300 motion-safe:animate-bounce" style={{ animationDelay: `${i * 150}ms` }} />
@@ -533,7 +533,7 @@ export const LayaRoutingCard: React.FC<{ routing: RoutingState; spaceName?: stri
             )}
             {others.length > 1 && (
               <button type="button" className={link} aria-expanded={othersOpen} aria-controls={`${ids}-others`} onClick={() => setOthersOpen((o) => !o)}>
-                Change
+                Who else
               </button>
             )}
           </>
@@ -559,7 +559,7 @@ export const LayaRoutingCard: React.FC<{ routing: RoutingState; spaceName?: stri
                   key={c.id}
                   title={c.title && c.title !== c.name ? `${c.name}, ${c.title}` : c.name}
                   className={`flex items-center gap-1.5 pl-0.5 pr-2.5 py-0.5 rounded-full border text-[11px] ${
-                    chosen ? 'border-sky-400/60 bg-sky-500/20 text-sky-100' : 'border-zinc-800 bg-zinc-900/40 text-zinc-400'
+                    chosen ? 'border-sky-400/60 bg-sky-500/20 text-sky-100' : 'border-transparent bg-transparent text-zinc-400 cursor-default'
                   }`}
                 >
                   <ModernAvatar role={c.name} name={c.name} size={18} mood="idle" />
@@ -569,7 +569,7 @@ export const LayaRoutingCard: React.FC<{ routing: RoutingState; spaceName?: stri
               );
             })}
           </div>
-          <span className="text-xs text-zinc-500">When the reply lands, “Wrong bot?” in its Details sends it to one of them.</span>
+          <span className="text-xs text-zinc-400">After {routing.kwantName} replies, tap “Wrong bot?” in its Details to send your message to one of them.</span>
         </div>
       )}
     </div>

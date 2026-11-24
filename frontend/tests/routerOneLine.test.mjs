@@ -72,7 +72,8 @@ for (const c of LINES) {
       const inline = host.querySelector('.md\\:inline');
       assert.equal(inline ? inline.textContent.replace(/^ · /, '') : null, c.why, 'desktop shows the short why inline');
       assert.equal(!!btn(host, 'Why'), !!c.why, 'the phone gets "Why" only when there is one');
-      assert.equal(host.querySelector('[data-route-line]').getAttribute('aria-live'), 'polite');
+      assert.equal(host.querySelector('[data-route-line]').getAttribute('aria-live'), null, 'not on the outer box');
+      assert.equal(host.querySelector('[data-route-line] > div').getAttribute('aria-live'), 'polite', 'only the first row is live');
     } finally {
       unmount();
     }
@@ -86,11 +87,11 @@ test('"Laya is offline" leaves the chat line but stays in Details and the space 
   assert.match(m.routingLine({ kwant_name: 'Quant', fallback: true, candidate_count: 9 }, 'Binance desk'), /Laya is offline/);
 });
 
-test('Why and Change are buttons that toggle aria-expanded and open in place', () => {
+test('Why and Who else are buttons that toggle aria-expanded and open in place', () => {
   const { host, unmount } = mount(routed({ basis: 'lead' }));
   try {
     const why = btn(host, 'Why');
-    const change = btn(host, 'Change');
+    const change = btn(host, 'Who else');
     assert.equal(why.getAttribute('aria-expanded'), 'false');
     assert.equal(change.getAttribute('aria-expanded'), 'false');
     assert.equal(document.getElementById(why.getAttribute('aria-controls')), null);
@@ -102,7 +103,11 @@ test('Why and Change are buttons that toggle aria-expanded and open in place', (
     const group = document.getElementById(change.getAttribute('aria-controls'));
     assert.equal(group.getAttribute('role'), 'group');
     assert.equal(group.querySelectorAll(':scope > div > span').length, 9, 'Change shows all 9 candidates');
-    assert.match(group.textContent, /Wrong bot\?/, 'and points at the reply’s existing way to change');
+    assert.match(group.textContent, /After Quant replies, tap “Wrong bot\?” in its Details/, 'and points at the reply’s existing way to change');
+    for (const chip of group.querySelectorAll(':scope > div > span')) {
+      if (/Quant/.test(chip.textContent)) assert.match(chip.className, /bg-sky-500\/20/);
+      else assert.match(chip.className, /border-transparent bg-transparent text-zinc-400 cursor-default/, 'view-only chips don’t look tappable');
+    }
     click(change);
     click(why);
     assert.equal(change.getAttribute('aria-expanded'), 'false');
@@ -117,10 +122,10 @@ test('Why and Change are buttons that toggle aria-expanded and open in place', (
   }
 });
 
-test('Change hides when there is no one else to pick', () => {
+test('Who else hides when there is no one else to pick', () => {
   const { host, unmount } = mount(routed({ basis: 'only', candidates: [candidates[0]] }));
   try {
-    assert.equal(btn(host, 'Change'), undefined);
+    assert.equal(btn(host, 'Who else'), undefined);
     assert.equal(btn(host, 'Why'), undefined);
   } finally {
     unmount();
@@ -130,7 +135,7 @@ test('Change hides when there is no one else to pick', () => {
 test('deciding: one line with three dots, no chip wall', () => {
   const { host, unmount } = mount({ phase: 'deciding', contextId: 'c1', candidates, candidateCount: 9 });
   try {
-    assert.equal(host.textContent.trim(), 'Choosing who answers…');
+    assert.equal(host.textContent.trim(), 'Choosing who answers');
     assert.equal(host.querySelectorAll('[title]').length, 0);
     assert.equal(host.querySelectorAll('button').length, 0);
     assert.equal(host.querySelectorAll('[aria-hidden="true"] > span').length, 3);
