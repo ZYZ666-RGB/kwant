@@ -446,6 +446,67 @@ async fn over_the_daily_cap_the_guest_waits_for_the_host_without_a_model_call() 
     assert!(invocations_with("CAPOVER13").is_empty(), "over the cap made a model call");
 }
 
+// ---- The card's cap stepper, cost line and Inbox (Pixel's #1156) ----
+
+#[tokio::test]
+async fn the_cards_set_cap_cost_line_and_inbox_item() {
+    let d = setup().await;
+    let (code, _host) = desk(&d, json!({ "daily_cap": 10 })).await;
+    let act = |name: &'static str, body: Value| {
+        let app = d.env.app.clone();
+        let code = code.clone();
+        async move { call(&app, "POST", &format!("/api/pockets/{code}/action"), Some(json!({ "name": name, "body": body }))).await }
+    };
+    // set_cap from the person's card: clamped, and the summary has it at once
+    let (s, v) = act("set_cap", json!({ "cap": 30 })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["summary"]["counts"]["daily_cap"], 30, "{v}");
+    let (s, v) = act("set_cap", json!({ "cap": 500 })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["summary"]["counts"]["daily_cap"], 200);
+    let (s, v) = act("set_cap", json!({ "cap": "lots" })).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    let (_, read) = call(&d.env.app, "GET", &format!("/api/pockets/{code}"), None).await;
+    assert_eq!(read["summary"]["counts"]["daily_cap"], 200, "a refused set_cap changes nothing");
+    assert_eq!(read["summary"]["cost_per_reply_usd"], Value::Null, "no reply yet");
+
+    // Two replies whose engine reported $0.004 and $0.002: the card reads $0.003 a reply
+    let (_, key) = joined(&d, &code, "Ann").await;
+    for (i, c) in ["0.004", "0.002"].iter().enumerate() {
+        let r = say(&d, &code, &key, &format!("Question {i} COSTUSD:{c} REPLYTAG:cost13n{i}")).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        wait_msg(&d, &code, &key, "bot", &format!("answer cost13n{i}")).await;
+        wait_idle(&d, &code, &key).await;
+    }
+    let (_, read) = call(&d.env.app, "GET", &format!("/api/pockets/{code}"), None).await;
+    assert_eq!(read["summary"]["cost_per_reply_usd"], 0.003, "{}", read["summary"]);
+
+    // A waiting guest is on /api/inbox too, with every /api/waiting field and the same id
+    let (_, key) = joined(&d, &code, "Ben").await;
+    let r = say(&d, &code, &key, &format!("Can I leave at 2? REPLYTEXT:{}", b64("[[person]] Late check-out: 2 PM"))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    common::wait_for("Ben waits", || async { desk_items(&d).await.len() == 1 }).await;
+    let waiting = desk_items(&d).await.remove(0);
+    let (s, inbox) = call(&d.env.app, "GET", "/api/inbox", None).await;
+    assert_eq!(s, StatusCode::OK, "{inbox}");
+    let items: Vec<&Value> = inbox["items"].as_array().unwrap().iter().filter(|i| i["kind"] == "pocket_desk").collect();
+    assert_eq!(items.len(), 1, "{inbox}");
+    let item = items[0];
+    for (k, v) in waiting.as_object().unwrap() {
+        assert_eq!(&item[k], v, "{k}");
+    }
+    assert_eq!(item["id"], format!("desk:{code}:{}", waiting["guest_id"].as_str().unwrap()).as_str());
+    assert_eq!(item["group"], "waiting_on_you");
+    assert_eq!(item["title"], "Ben needs you");
+    assert!(inbox["counts"]["waiting_on_you"].as_u64().unwrap() >= 1);
+    // Answered from the card: it leaves both lists
+    let (s, v) = act("resolve", json!({ "guest": waiting["guest_id"] })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(desk_items(&d).await.is_empty());
+    let (_, inbox) = call(&d.env.app, "GET", "/api/inbox", None).await;
+    assert!(!inbox["items"].as_array().unwrap().iter().any(|i| i["kind"] == "pocket_desk"), "{inbox}");
+}
+
 // ---- Hand-off ----
 
 #[tokio::test]

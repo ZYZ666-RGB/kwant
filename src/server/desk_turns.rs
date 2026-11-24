@@ -113,7 +113,7 @@ async fn run_one(state: &AppState, code: &str, guest: &str, texts: Vec<String>, 
     let bot = s.spec["answer_bot"].as_str().unwrap_or("");
     let label = desk::bot_label(&s.spec);
     let Ok(Some(kwant)) = state.db.get_kwant(bot).await else {
-        let _ = hand_off(state, code, guest, &no_reply_why(&label, NoReply::BotGone), desk::HOST_AWAY).await;
+        let _ = hand_off(state, code, guest, &no_reply_why(&label, NoReply::BotGone), desk::HOST_AWAY, None).await;
         let _ = pocket::server_event(state, code, "idle", &json!({ "guest": guest })).await;
         return false;
     };
@@ -138,22 +138,32 @@ async fn run_one(state: &AppState, code: &str, guest: &str, texts: Vec<String>, 
         opts: guest_opts,
         extra_meta: json!({ "pocket_code": code, "guest_reply": true }),
     };
+    let mark = state.db.thread_mark(&thread_id).await.ok();
     let Some(result) = outsider::run_outsider_turn(state, turn).await else {
         let _ = pocket::server_event(state, code, "idle", &json!({ "guest": guest })).await;
         return false;
     };
+    // What the turn cost, from the bot's saved reply (engines that report it): the card's
+    // cost-per-reply line averages these
+    let cost = match &result {
+        Ok(_) => match mark {
+            Some(mark) => state.db.reply_cost_after(&thread_id, &kwant.id, mark).await.ok().flatten(),
+            None => None,
+        },
+        Err(_) => None,
+    };
     let step = match result {
         Ok(reply) => match outsider::handoff_reason(&reply, desk::REASON_MAX) {
-            Some(why) => hand_off(state, code, guest, &asked_why(&label, why), desk::HANDOFF).await,
+            Some(why) => hand_off(state, code, guest, &asked_why(&label, why), desk::HANDOFF, cost).await,
             None => {
                 let app_url = outsider::app_url(state, &kwant.space_id).await;
                 match outsider::plain_reply(&reply, app_url.as_deref()) {
-                    Some(out) => pocket::server_event(state, code, "answer", &json!({ "guest": guest, "text": out })).await.map(|_| ()),
-                    None => hand_off(state, code, guest, &no_reply_why(&label, NoReply::Empty), desk::HOST_AWAY).await,
+                    Some(out) => pocket::server_event(state, code, "answer", &json!({ "guest": guest, "text": out, "cost_usd": cost })).await.map(|_| ()),
+                    None => hand_off(state, code, guest, &no_reply_why(&label, NoReply::Empty), desk::HOST_AWAY, cost).await,
                 }
             }
         },
-        Err(_) => hand_off(state, code, guest, &no_reply_why(&label, NoReply::Failed), desk::HOST_AWAY).await,
+        Err(_) => hand_off(state, code, guest, &no_reply_why(&label, NoReply::Failed), desk::HOST_AWAY, None).await,
     };
     match step {
         Ok(()) => true,
@@ -219,8 +229,8 @@ async fn capped_tell(state: &AppState, code: &str, guest: &str) {
 /// The bot can't or mustn't answer: the guest gets `note` ([`desk::HANDOFF`] for the bot's own
 /// `[[person]]`, [`desk::HOST_AWAY`] when no reply came), the host a Needs-you item and a
 /// notification.
-async fn hand_off(state: &AppState, code: &str, guest: &str, why: &str, note: &str) -> pocket::PResult<()> {
-    pocket::server_event(state, code, "handoff", &json!({ "guest": guest, "why": why, "note": note })).await?;
+async fn hand_off(state: &AppState, code: &str, guest: &str, why: &str, note: &str, cost_usd: Option<f64>) -> pocket::PResult<()> {
+    pocket::server_event(state, code, "handoff", &json!({ "guest": guest, "why": why, "note": note, "cost_usd": cost_usd })).await?;
     told_host(state, code, guest).await;
     Ok(())
 }

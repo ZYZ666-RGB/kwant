@@ -10,6 +10,7 @@
 //! Limits: 20 messages an hour per guest (the 21st is a 429 `slow_down`), 1,000 characters a
 //! message (413 `too_long`), `max_guests` guests (409 `guest_max`), and `daily_cap` bot replies
 //! a day for the whole pocket: past it a message is saved and waits for the host (no model call).
+//! The host's `set_cap` changes that limit on a running desk (it wins over the spec's).
 //!
 //! Retention: a guest's data goes 7 days after their last message (their row, keys, events,
 //! bot thread and conversation, swept once a minute); the pocket goes 7 days after it ends.
@@ -76,6 +77,14 @@ struct St {
     next: u64,
     #[serde(default)]
     guests: BTreeMap<String, G>,
+    /// The host's `set_cap` (10 to 200); it wins over the spec's `daily_cap`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cap: Option<u64>,
+    /// What the bot's turns cost, summed over the turns whose engine said (`priced_turns`).
+    #[serde(default)]
+    spent_usd: f64,
+    #[serde(default)]
+    priced_turns: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -166,6 +175,14 @@ pub fn daily_cap(spec: &Value) -> u64 {
     spec.get("daily_cap").and_then(Value::as_u64).unwrap_or(DAILY_CAP).clamp(DAILY_CAP_MIN, DAILY_CAP_MAX)
 }
 
+/// The limit in force: the host's `set_cap`, else the spec's.
+fn cap_now(spec: &Value, s: &St) -> u64 {
+    s.cap.map_or_else(|| daily_cap(spec), |c| c.clamp(DAILY_CAP_MIN, DAILY_CAP_MAX))
+}
+
+/// A cost a turn reported, as `cost_usd` on `answer`/`handoff`; nonsense is ignored.
+pub const COST_MAX_USD: f64 = 100.0;
+
 pub fn max_guests(spec: &Value) -> usize {
     spec.get("max_guests").and_then(Value::as_u64).unwrap_or(MAX_GUESTS).clamp(1, DEFAULT_MAX_PLAYERS as u64) as usize
 }
@@ -220,6 +237,19 @@ impl St {
             let extra = g.msgs.len() - KEEP_MESSAGES;
             g.msgs.drain(..extra);
         }
+    }
+
+    /// Books what one turn cost (`body.cost_usd`, from the bot's saved reply), when it said.
+    fn spend(&mut self, body: &Value) {
+        if let Some(c) = body.get("cost_usd").and_then(Value::as_f64).filter(|c| c.is_finite() && (0.0..COST_MAX_USD).contains(c)) {
+            self.spent_usd += c;
+            self.priced_turns += 1;
+        }
+    }
+
+    /// The average cost of a reply on this desk so far; `None` until a turn reported one.
+    fn cost_per_reply(&self) -> Option<f64> {
+        (self.priced_turns > 0).then(|| (self.spent_usd / self.priced_turns as f64 * 1e6).round() / 1e6)
     }
 
     /// Past the daily cap: the guest waits for the host, with one `daily_cap` note a day.
@@ -393,7 +423,7 @@ impl Desk {
         s.roll(now);
         s.messages_today += 1;
         s.push(pid, GUEST, text.clone(), now, client_id, None);
-        if s.replies_today >= daily_cap(ctx.spec) {
+        if s.replies_today >= cap_now(ctx.spec, s) {
             s.cap(pid, now);
         } else {
             let g = s.guests.entry(pid.to_string()).or_default();
@@ -416,7 +446,7 @@ impl Kit for Desk {
             // The kit's own `max_guests` is checked in `admit`, so a full desk says `guest_max`
             max_players: DEFAULT_MAX_PLAYERS,
             guest_actions: &["say"],
-            host_actions: &["reply", "resolve"],
+            host_actions: &["reply", "resolve", "set_cap"],
         }
     }
 
@@ -505,6 +535,15 @@ impl Kit for Desk {
                 g.waiting = None;
                 g.read_at = Some(ctx.now);
             }
+            // The card's cap stepper: clamped to 10..200. Guests already waiting past the old
+            // limit stay with the host; their next message goes to the bot while under it.
+            (Viewer::Host, "set_cap") => {
+                let cap = body.get("cap").and_then(|c| c.as_i64().or_else(|| c.as_f64().filter(|f| f.is_finite() && f.fract() == 0.0).map(|f| f as i64)));
+                let Some(cap) = cap else {
+                    return Err(KitError::BadInput(format!("cap must be a whole number from {DAILY_CAP_MIN} to {DAILY_CAP_MAX}.")));
+                };
+                s.cap = Some(cap.clamp(DAILY_CAP_MIN as i64, DAILY_CAP_MAX as i64) as u64);
+            }
             _ => return Err(KitError::BadInput("That action isn't one this pocket knows.".into())),
         }
         store(state, &s);
@@ -539,11 +578,12 @@ impl Kit for Desk {
         let g = guide(ctx.spec);
         let waiting = ctx.players.iter().filter(|p| s.guests.get(&p.id).is_some_and(|g| g.waiting.is_some())).count();
         json!({
-            "counts": { "guests": ctx.players.len(), "waiting": waiting, "replies_today": replies, "daily_cap": daily_cap(ctx.spec), "messages_today": msgs },
+            "counts": { "guests": ctx.players.len(), "waiting": waiting, "replies_today": replies, "daily_cap": cap_now(ctx.spec, &s), "messages_today": msgs },
             "cap_resets_at": next_midnight(ctx.now),
             // The core fills the bot's name and model and the address from what it knows
             "answer_bot": { "id": spec_str(ctx.spec, "answer_bot"), "name": bot_face(ctx.spec)["name"], "sprite": SPRITE, "model": null },
-            "cost_per_reply_usd": null,
+            // Measured on this desk: the average of its turns' reported costs (null until one)
+            "cost_per_reply_usd": s.cost_per_reply(),
             "guide_chars": g.chars().count(),
             "guide_facts": g.lines().filter(|l| !l.trim().is_empty()).count(),
             "address": null,
@@ -567,11 +607,12 @@ impl Kit for Desk {
             // worker stops. Each turn taken counts against the daily cap.
             "take" => {
                 s.roll(ctx.now);
+                let cap = cap_now(ctx.spec, &s);
                 let g = s.guests.entry(pid.clone()).or_default();
                 if g.pending.is_empty() {
                     g.busy = false;
                     json!({ "texts": [] })
-                } else if s.replies_today >= daily_cap(ctx.spec) {
+                } else if s.replies_today >= cap {
                     s.cap(&pid, ctx.now);
                     json!({ "texts": [], "capped": true })
                 } else {
@@ -591,6 +632,7 @@ impl Kit for Desk {
                 json!({ "thread_id": g.thread_id })
             }
             "answer" => {
+                s.spend(body);
                 let text = cut(body.get("text").and_then(Value::as_str).unwrap_or("").trim(), REPLY_MAX);
                 if !text.is_empty() {
                     s.push(&pid, BOT, text, ctx.now, None, None);
@@ -598,6 +640,7 @@ impl Kit for Desk {
                 json!({})
             }
             "handoff" => {
+                s.spend(body);
                 let why = cut(body.get("why").and_then(Value::as_str).unwrap_or("").trim(), REASON_MAX);
                 let note = if body.get("note").and_then(Value::as_str) == Some(HOST_AWAY) { HOST_AWAY } else { HANDOFF };
                 s.push(&pid, NOTE, String::new(), ctx.now, None, Some(note));
@@ -851,6 +894,68 @@ mod tests {
         let t = Desk.server_event(&mut ctx, &mut st, "thread", &json!({ "guest": "pl_ann", "thread_id": "th2" })).unwrap();
         assert_eq!(t["thread_id"], json!("th1"), "the second opener drops its own");
         assert_eq!(thread_of(&st, "pl_ann").as_deref(), Some("th1"));
+    }
+
+    #[test]
+    fn the_hosts_set_cap_wins_over_the_spec_and_is_clamped() {
+        let now = Utc::now();
+        let ps = players(now);
+        let spec = spec(); // daily_cap 10
+        let mut st = Desk.init(&spec);
+        let mut ctx = KitCtx::new(&spec, &ps, now);
+        assert!(Desk.rules(&spec).host_actions.contains(&"set_cap"));
+        for i in 0..10 {
+            say(&mut st, &mut ctx, "pl_ann", &format!("q{i}")).unwrap();
+            Desk.server_event(&mut ctx, &mut st, "take", &json!({ "guest": "pl_ann" })).unwrap();
+        }
+        // At the spec's 10: the next one waits for the host
+        say(&mut st, &mut ctx, "pl_ann", "q10").unwrap();
+        assert!(capped_at(&st, "pl_ann", now));
+        // The host raises it to 20: Ann still waits (the host has her), Ben's message goes to the bot
+        Desk.act(&mut ctx, &mut st, &Viewer::Host, "set_cap", &json!({ "cap": 20 })).unwrap();
+        assert_eq!(Desk.host_summary(&ctx, &st)["counts"]["daily_cap"], json!(20));
+        assert_eq!(waiting_guests(&st).len(), 1);
+        say(&mut st, &mut ctx, "pl_ben", "Wi-Fi?").unwrap();
+        let t = Desk.server_event(&mut ctx, &mut st, "take", &json!({ "guest": "pl_ben" })).unwrap();
+        assert_eq!(t["texts"], json!(["Wi-Fi?"]));
+        // Lowered under today's replies: the next turn waits again
+        Desk.act(&mut ctx, &mut st, &Viewer::Host, "set_cap", &json!({ "cap": 10 })).unwrap();
+        say(&mut st, &mut ctx, "pl_ben", "And parking?").unwrap();
+        assert_eq!(Desk.view(&ctx, &st, &Viewer::Guest("pl_ben".into()))["waiting_for_host"], json!(true));
+        // Clamped to 10..200; a whole float is fine; anything else is refused and changes nothing
+        for (cap, want) in [(json!(1), 10), (json!(500), 200), (json!(-3), 10), (json!(60.0), 60)] {
+            Desk.act(&mut ctx, &mut st, &Viewer::Host, "set_cap", &json!({ "cap": cap })).unwrap();
+            assert_eq!(Desk.host_summary(&ctx, &st)["counts"]["daily_cap"], json!(want), "{cap}");
+        }
+        for bad in [json!({}), json!({ "cap": "50" }), json!({ "cap": 12.5 }), json!({ "cap": null })] {
+            assert!(matches!(Desk.act(&mut ctx, &mut st, &Viewer::Host, "set_cap", &bad), Err(KitError::BadInput(_))), "{bad}");
+        }
+        assert_eq!(Desk.host_summary(&ctx, &st)["counts"]["daily_cap"], json!(60));
+        // A guest can't set it
+        assert!(Desk.act(&mut ctx, &mut st, &Viewer::Guest("pl_ann".into()), "set_cap", &json!({ "cap": 200 })).is_err());
+    }
+
+    #[test]
+    fn cost_per_reply_is_the_average_of_the_turns_that_reported_one() {
+        let now = Utc::now();
+        let ps = players(now);
+        let spec = spec();
+        let mut st = Desk.init(&spec);
+        let mut ctx = KitCtx::new(&spec, &ps, now);
+        assert_eq!(Desk.host_summary(&ctx, &st)["cost_per_reply_usd"], Value::Null, "null until a turn says");
+        // An engine that doesn't report a cost books nothing
+        Desk.server_event(&mut ctx, &mut st, "answer", &json!({ "guest": "pl_ann", "text": "a", "cost_usd": null })).unwrap();
+        assert_eq!(Desk.host_summary(&ctx, &st)["cost_per_reply_usd"], Value::Null);
+        Desk.server_event(&mut ctx, &mut st, "answer", &json!({ "guest": "pl_ann", "text": "b", "cost_usd": 0.004 })).unwrap();
+        Desk.server_event(&mut ctx, &mut st, "handoff", &json!({ "guest": "pl_ben", "why": "Late check-out", "cost_usd": 0.002 })).unwrap();
+        // Nonsense is ignored
+        for bad in [json!(-1.0), json!(1e9), json!("0.5")] {
+            Desk.server_event(&mut ctx, &mut st, "answer", &json!({ "guest": "pl_ann", "text": "c", "cost_usd": bad })).unwrap();
+        }
+        assert_eq!(Desk.host_summary(&ctx, &st)["cost_per_reply_usd"], json!(0.003));
+        // It survives a save and load
+        let again: St = serde_json::from_value(st.clone()).unwrap();
+        assert_eq!(again.priced_turns, 2);
     }
 
     #[test]
