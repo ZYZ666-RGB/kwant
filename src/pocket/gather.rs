@@ -411,7 +411,7 @@ impl St {
             let tie = matches!(tally.outcome, Outcome::Tie { .. });
             self.phase = if tie { TIE } else { CLOSED }.into();
             self.done = !tie;
-            ctx.event(None, if tie { "tie" } else { "closed" }, json!({ "ballots": self.ballots.len() }));
+            ctx.event(None, if tie { "tie" } else { "closed" }, json!({ "ballots_counted": self.ballots.len() }));
             self.tally = Some(tally);
         } else {
             self.phase = CLOSED.into();
@@ -546,7 +546,7 @@ fn tally_json(spec: &Value, s: &St) -> Value {
         "outcome": if s.picked { "picked" } else { kind },
         "winner": winner.map(|o| json!({ "option": o, "name": name(o), "votes": votes_of(o) })),
         "tied": tied.iter().map(|o| json!({ "option": o, "name": name(*o), "votes": votes_of(*o) })).collect::<Vec<_>>(),
-        "ballots": s.ballots.len(),
+        "ballots_counted": s.ballots.len(),
         "final_round_active": last.map(|r| r.counts.iter().map(|(_, c)| c).sum::<u32>()),
         "rounds": rounds,
     })

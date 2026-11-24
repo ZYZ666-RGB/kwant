@@ -360,7 +360,12 @@ async fn no_route_pairs_a_person_with_a_ballot() {
     let result = view_of(&t, &code, &a_key).await["result"].clone();
     assert_eq!(result["outcome"], "winner", "{result}");
     assert!(!result["rounds"].as_array().unwrap().is_empty());
+    assert_eq!(result["ballots_counted"], 5, "a count, named so no view carries a \"ballots\" key");
     let before = every_route(&t, &code, &host_key, &a_key).await;
+    for (route, status, body) in &before {
+        let text = body.to_string();
+        assert!(!text.contains("ballot_salt") && !text.contains("\"ballots\""), "{route} ({status}): {text}");
+    }
     swap_ballots(&t, &code, &p[1].0, &p[2].0, &p[0].0).await;
     same(&before, &every_route(&t, &code, &host_key, &a_key).await, "closed");
 
