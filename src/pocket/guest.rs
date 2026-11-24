@@ -550,6 +550,14 @@ async fn photo_upload(State(state): State<AppState>, Path(code): Path<String>, h
     if declared.is_some_and(|n| n > max) {
         return Err(super::wall::too_big(max));
     }
+    // A slot first (pa14 QA F2): the body is read only once one is free, so 20 guests at once
+    // never hold 20 photos in memory. A busy minute ends in the same `slow_down` as the rate.
+    let slot = tokio::time::timeout(std::time::Duration::from_secs(super::wall::UPLOAD_WAIT_SECS), super::wall::UPLOADS.acquire()).await;
+    let Ok(Ok(_slot)) = slot else {
+        let mut res = PocketError::new(StatusCode::TOO_MANY_REQUESTS, "slow_down", "Lots of photos are going up right now: wait a few seconds and send it again.").into_response();
+        res.headers_mut().insert(header::RETRY_AFTER, axum::http::HeaderValue::from_static("3"));
+        return Ok(res);
+    };
     let bytes = match http_body_util::Limited::new(body, max as usize).collect().await {
         Ok(b) => b.to_bytes(),
         Err(e) if e.downcast_ref::<http_body_util::LengthLimitError>().is_some() => return Err(super::wall::too_big(max)),

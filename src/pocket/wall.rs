@@ -34,7 +34,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const ID: &str = "wall";
@@ -57,6 +57,12 @@ pub const DISK_FLOOR: u64 = 2 * 1024 * MB;
 pub const UPLOAD_LIMIT: usize = (PHOTO_CAP_MB_MAX * MB) as usize;
 /// Ids one host action may name.
 const IDS_MAX: usize = 1000;
+/// Photo uploads in flight at once across every wall (pa14 QA F2): each holds up to
+/// [`UPLOAD_LIMIT`] in memory plus its stripped copy, so 4 keep it near 200 MB on a small box.
+/// Others wait for a slot (their bodies stay unread meanwhile) up to [`UPLOAD_WAIT_SECS`].
+pub const UPLOADS_IN_FLIGHT: usize = 4;
+pub const UPLOAD_WAIT_SECS: u64 = 20;
+pub static UPLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(UPLOADS_IN_FLIGHT);
 
 const SPEC_FIELDS: &[&str] = &["title", "when", "event_at", "closes_at", "host_name", "photo_cap_mb", "pocket_cap_mb", "per_guest_max", "captions"];
 
@@ -874,8 +880,9 @@ pub async fn photo_response(state: &AppState, s: &Snapshot, id: &str, viewer: &V
 
 // ---- Zip (main port, the person) ----
 
-/// A zip entry's name: `001-mia-2114.jpg` (number, the guest's first name, upload time HHMM UTC).
-fn entry_name(n: usize, name: Option<&str>, at: Option<DateTime<Utc>>, kind: Kind) -> String {
+/// A zip entry's name: `001-mia-2114.jpg` (number, the guest's first name, upload time HHMM in
+/// the local time of the computer kwant runs on, the host's own clock).
+fn entry_name(n: usize, name: Option<&str>, at: Option<DateTime<chrono::FixedOffset>>, kind: Kind) -> String {
     let mut slug = String::new();
     for ch in name.unwrap_or("").chars().flat_map(char::to_lowercase) {
         if ch.is_alphanumeric() {
@@ -944,7 +951,8 @@ pub async fn zip_response(state: &AppState, code: &str, pick: ZipPick) -> PResul
     let dir = wall_dir(state, code).ok_or_else(PocketError::not_found)?;
     let st = load(&s.kit_state);
     let ctx = KitCtx::new(&s.spec, &s.players, Utc::now());
-    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    // (entry name, file, degrees a JPEG's orientation block says in the zip)
+    let mut files: Vec<(String, PathBuf, u16)> = Vec::new();
     let mut total = 0u64;
     let wanted = |p: &&Photo| match pick {
         ZipPick::Approved => p.status == APPROVED,
@@ -954,7 +962,9 @@ pub async fn zip_response(state: &AppState, code: &str, pick: ZipPick) -> PResul
     for p in st.photos.iter().filter(wanted) {
         let Some(kind) = Kind::from_ext(&p.ext) else { continue };
         let name = first_name(&ctx, &p.by);
-        files.push((entry_name(files.len() + 1, name.as_deref(), p.at, kind), dir.join(format!("{}.{}", p.id, kind.ext()))));
+        let at = p.at.map(|t| t.with_timezone(&chrono::Local).fixed_offset());
+        let turn = if kind == Kind::Jpeg { p.rotate } else { 0 };
+        files.push((entry_name(files.len() + 1, name.as_deref(), at, kind), dir.join(format!("{}.{}", p.id, kind.ext())), turn));
         total += p.bytes;
     }
     let large = total > 3 * 1024 * MB;
@@ -964,9 +974,17 @@ pub async fn zip_response(state: &AppState, code: &str, pick: ZipPick) -> PResul
         let res = (|| -> zip::result::ZipResult<()> {
             let mut z = zip::ZipWriter::new_stream(ChanWriter { tx, buf: Vec::with_capacity(CHUNK) });
             let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).large_file(large);
-            for (name, path) in files {
+            for (name, path, turn) in files {
                 // A photo hidden since the list was made is gone: skip it
                 let Ok(mut f) = std::fs::File::open(&path) else { continue };
+                if turn != 0 {
+                    // Photo apps don't know `rotate`: a JPEG gets its orientation back, in the zip only
+                    let mut b = Vec::new();
+                    f.read_to_end(&mut b)?;
+                    z.start_file(name, opts)?;
+                    z.write_all(&photo::jpeg_with_orientation(&b, turn).unwrap_or(b))?;
+                    continue;
+                }
                 z.start_file(name, opts)?;
                 std::io::copy(&mut f, &mut z)?;
             }
@@ -1123,7 +1141,7 @@ mod tests {
 
     #[test]
     fn zip_names() {
-        let at = DateTime::parse_from_rfc3339("2026-12-01T21:14:00Z").unwrap().with_timezone(&Utc);
+        let at = DateTime::parse_from_rfc3339("2026-12-01T21:14:00+00:00").unwrap();
         assert_eq!(entry_name(1, Some("Mia"), Some(at), Kind::Jpeg), "001-mia-2114.jpg");
         assert_eq!(entry_name(12, Some("Zoë-Ann  O'Neil"), Some(at), Kind::Png), "012-zoë-ann-o-neil-2114.png");
         assert_eq!(entry_name(3, None, Some(at), Kind::Webp), "003-guest-2114.webp");

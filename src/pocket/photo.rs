@@ -6,12 +6,19 @@
 //! - JPEG keeps APP0 `JFIF`, APP2 `ICC_PROFILE` and the image segments; it drops APP1 (Exif, XMP),
 //!   APP13 (IPTC), COM, every other APPn and anything after the end marker (phones put extra
 //!   pictures there, each with its own Exif).
-//! - PNG drops `eXIf`, `tEXt`, `iTXt`, `zTXt` and `tIME`, and anything after `IEND`.
-//! - WebP drops the `EXIF` and `XMP ` chunks, clears their two flags in `VP8X` and fixes the RIFF
-//!   size.
+//! - PNG keeps only the chunks in [`PNG_KEEP`] (the image, its colour and APNG frames) and drops
+//!   every other one (`eXIf`, text, `tIME`, C2PA `caBX`, any private chunk) and anything after
+//!   `IEND`.
+//! - WebP keeps only the chunks in [`WEBP_KEEP`] (inside an animation frame only its image and
+//!   alpha), sets the `VP8X` flags to match what it kept and fixes the RIFF size.
+//!
+//! Both are allowlists (pa14 QA F1): a chunk nobody listed, such as C2PA or a maker's own, never
+//! gets through. ICC colour profiles stay on purpose: they say how the colours look, not where or
+//! with what the photo was taken.
 //!
 //! The Exif orientation is read before its segment goes and comes back as `rotate` (0, 90, 180 or
-//! 270 degrees clockwise), so viewers turn the photo the way the camera held it.
+//! 270 degrees clockwise), so viewers turn the photo the way the camera held it. The zip alone
+//! writes it back into JPEGs ([`jpeg_with_orientation`]), since photo apps don't know `rotate`.
 
 /// A photo type the wall takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +151,44 @@ fn tiff_rotate(t: &[u8]) -> Option<u16> {
     None
 }
 
+/// The Exif orientation for degrees clockwise (1 for none or anything else).
+fn orientation(rotate: u16) -> u16 {
+    match rotate {
+        90 => 6,
+        180 => 3,
+        270 => 8,
+        _ => 1,
+    }
+}
+
+/// For the zip only: a stripped JPEG with one Exif block that holds the orientation and no other
+/// tag, right after the start marker (after JFIF when it leads), so photo apps turn it the way
+/// the wall does. Stored and served bytes never get it: viewers turn by `rotate`, so it would turn
+/// twice. `None` when there is nothing to turn or `b` isn't a JPEG.
+pub fn jpeg_with_orientation(b: &[u8], rotate: u16) -> Option<Vec<u8>> {
+    let o = orientation(rotate);
+    if o == 1 || !b.starts_with(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let mut at = 2;
+    if b.get(2..4) == Some(&[0xFF, 0xE0][..]) && b.get(6..11) == Some(&b"JFIF\0"[..]) {
+        at = 4 + be16(b, 4)? as usize;
+        if at > b.len() {
+            return None;
+        }
+    }
+    // APP1: "Exif\0\0", a big-endian TIFF header, IFD0 with the one entry (0x0112, SHORT, 1), no next IFD
+    let mut seg = vec![0xFF, 0xE1, 0x00, 0x22];
+    seg.extend_from_slice(b"Exif\0\0MM\0\x2A\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01");
+    seg.extend_from_slice(&o.to_be_bytes());
+    seg.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+    let mut out = Vec::with_capacity(b.len() + seg.len());
+    out.extend_from_slice(&b[..at]);
+    out.extend_from_slice(&seg);
+    out.extend_from_slice(&b[at..]);
+    Some(out)
+}
+
 fn be16(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes([*b.get(at)?, *b.get(at + 1)?]))
 }
@@ -235,6 +280,13 @@ fn strip_jpeg(b: &[u8]) -> Result<Stripped, Broken> {
 
 const PNG_SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
 
+/// The PNG chunks that get through: the image, its colour and the APNG frames. Nothing else.
+pub const PNG_KEEP: [&[u8; 4]; 15] =
+    [b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND", b"gAMA", b"cHRM", b"sRGB", b"iCCP", b"sBIT", b"bKGD", b"pHYs", b"acTL", b"fcTL", b"fdAT"];
+
+/// The WebP chunks that get through. Nothing else.
+pub const WEBP_KEEP: [&[u8; 4]; 7] = [b"VP8X", b"VP8 ", b"VP8L", b"ALPH", b"ANIM", b"ANMF", b"ICCP"];
+
 fn strip_png(b: &[u8]) -> Result<Stripped, Broken> {
     if !b.starts_with(PNG_SIG) {
         return Err(Broken);
@@ -269,8 +321,7 @@ fn strip_png(b: &[u8]) -> Result<Stripped, Broken> {
                 }
                 false
             }
-            b"tEXt" | b"iTXt" | b"zTXt" | b"tIME" => false,
-            _ => true,
+            t => PNG_KEEP.iter().any(|k| &k[..] == t),
         };
         if keep {
             out.extend_from_slice(&b[i..end]);
@@ -287,9 +338,35 @@ fn le24(b: &[u8]) -> u32 {
     u32::from(b[0]) | (u32::from(b[1]) << 8) | (u32::from(b[2]) << 16)
 }
 
-/// VP8X flags: bit 3 says there is an EXIF chunk, bit 2 an XMP chunk.
-const VP8X_EXIF: u8 = 0x08;
-const VP8X_XMP: u8 = 0x04;
+/// VP8X flags: an ICC chunk, alpha, an EXIF chunk, an XMP chunk, an animation.
+const VP8X_ICC: u8 = 0x20;
+const VP8X_ALPHA: u8 = 0x10;
+const VP8X_ANIM: u8 = 0x02;
+
+/// One animation frame's payload (`ANMF`): its 16-byte header, then only its alpha and image
+/// chunks; any other chunk inside a frame is dropped too.
+fn webp_frame(d: &[u8]) -> Result<Vec<u8>, Broken> {
+    let head = d.get(..16).ok_or(Broken)?;
+    let mut out = head.to_vec();
+    let mut i = 16;
+    while i < d.len() {
+        let h = d.get(i..i + 8).ok_or(Broken)?;
+        let size = u32::from_le_bytes([h[4], h[5], h[6], h[7]]) as usize;
+        let data_end = (i + 8).checked_add(size).ok_or(Broken)?;
+        if data_end > d.len() {
+            return Err(Broken);
+        }
+        let next = (data_end + (size & 1)).min(d.len());
+        if matches!(&h[..4], b"ALPH" | b"VP8 " | b"VP8L") {
+            out.extend_from_slice(&d[i..data_end]);
+            if size & 1 == 1 {
+                out.push(0);
+            }
+        }
+        i = next;
+    }
+    Ok(out)
+}
 
 fn strip_webp(b: &[u8]) -> Result<Stripped, Broken> {
     if b.len() < 12 || &b[..4] != b"RIFF" || &b[8..12] != b"WEBP" {
@@ -304,7 +381,7 @@ fn strip_webp(b: &[u8]) -> Result<Stripped, Broken> {
     out.extend_from_slice(b"RIFF\0\0\0\0WEBP");
     let (mut rotate, mut w, mut h) = (0, None, None);
     let mut flags_at = None;
-    let mut image = false;
+    let (mut image, mut icc, mut anim) = (false, false, false);
     let mut i = 12;
     while i < end {
         let head = b.get(i..i + 8).filter(|_| i + 8 <= end).ok_or(Broken)?;
@@ -323,7 +400,25 @@ fn strip_webp(b: &[u8]) -> Result<Stripped, Broken> {
                 }
                 false
             }
-            b"XMP " => false,
+            b"ANMF" => {
+                let frame = webp_frame(data)?;
+                out.extend_from_slice(b"ANMF");
+                out.extend_from_slice(&u32::try_from(frame.len()).map_err(|_| Broken)?.to_le_bytes());
+                out.extend_from_slice(&frame);
+                if frame.len() & 1 == 1 {
+                    out.push(0);
+                }
+                image = true;
+                false
+            }
+            b"ICCP" => {
+                icc = true;
+                true
+            }
+            b"ANIM" => {
+                anim = true;
+                true
+            }
             b"VP8X" => {
                 if size >= 10 {
                     w = Some(le24(&data[4..7]) + 1);
@@ -350,10 +445,13 @@ fn strip_webp(b: &[u8]) -> Result<Stripped, Broken> {
                 image = true;
                 true
             }
-            _ => true,
+            t => WEBP_KEEP.iter().any(|k| &k[..] == t),
         };
         if keep {
             out.extend_from_slice(&b[i..next]);
+            if next == data_end && size & 1 == 1 {
+                out.push(0);
+            }
         }
         i = next;
     }
@@ -361,7 +459,9 @@ fn strip_webp(b: &[u8]) -> Result<Stripped, Broken> {
         return Err(Broken);
     }
     if let Some(at) = flags_at {
-        out[at] &= !(VP8X_EXIF | VP8X_XMP);
+        // Only what was kept: never EXIF or XMP, ICC and animation only with their chunk
+        let keep = VP8X_ALPHA | if icc { VP8X_ICC } else { 0 } | if anim { VP8X_ANIM } else { 0 };
+        out[at] &= keep;
     }
     let size = u32::try_from(out.len() - 8).map_err(|_| Broken)?;
     out[4..8].copy_from_slice(&size.to_le_bytes());
@@ -388,5 +488,99 @@ mod tests {
         assert_eq!(strip(Kind::Jpeg, &[0xFF, 0xD8, 0xFF, 0xD9]), Err(Broken), "no scan");
         assert_eq!(strip(Kind::Png, b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR"), Err(Broken));
         assert_eq!(strip(Kind::Webp, b"RIFF\xff\0\0\0WEBP"), Err(Broken));
+    }
+
+    fn png_chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut c = (data.len() as u32).to_be_bytes().to_vec();
+        c.extend_from_slice(ty);
+        c.extend_from_slice(data);
+        c.extend_from_slice(&[0, 0, 0, 0]);
+        c
+    }
+
+    fn riff(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut c = ty.to_vec();
+        c.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        c.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            c.push(0);
+        }
+        c
+    }
+
+    fn webp_file(chunks: &[Vec<u8>]) -> Vec<u8> {
+        let body: Vec<u8> = chunks.concat();
+        let mut w = b"RIFF".to_vec();
+        w.extend_from_slice(&(body.len() as u32 + 4).to_le_bytes());
+        w.extend_from_slice(b"WEBP");
+        w.extend_from_slice(&body);
+        w
+    }
+
+    fn has(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn only_listed_chunks_get_through() {
+        let mut p = PNG_SIG.to_vec();
+        p.extend(png_chunk(b"IHDR", &[0, 0, 0, 3, 0, 0, 0, 2, 8, 2, 0, 0, 0]));
+        p.extend(png_chunk(b"iCCP", b"ICC-KEPT\0\0x"));
+        p.extend(png_chunk(b"caBX", b"C2PA-CANARY"));
+        p.extend(png_chunk(b"prVt", b"PRIVATE-CANARY"));
+        p.extend(png_chunk(b"IDAT", &[1, 2, 3]));
+        p.extend(png_chunk(b"IEND", &[]));
+        let s = strip(Kind::Png, &p).unwrap();
+        assert!(!has(&s.bytes, b"CANARY") && !has(&s.bytes, b"caBX") && !has(&s.bytes, b"prVt"));
+        assert!(has(&s.bytes, b"ICC-KEPT"), "ICC stays on purpose");
+
+        // VP8X says ICC, alpha, EXIF, XMP and animation; there is ICC and C2PA but no ANIM
+        let mut vp8x = vec![0x20 | 0x10 | 0x08 | 0x04 | 0x02, 0, 0, 0];
+        vp8x.extend_from_slice(&[0x1F, 0x03, 0x00, 0x57, 0x02, 0x00]);
+        let w = webp_file(&[riff(b"VP8X", &vp8x), riff(b"ICCP", b"ICC-KEPT"), riff(b"VP8L", &[0x2F, 1, 2, 3, 4]), riff(b"C2PA", b"C2PA-CANARY!")]);
+        let s = strip(Kind::Webp, &w).unwrap();
+        assert!(!has(&s.bytes, b"CANARY") && !has(&s.bytes, b"C2PA"));
+        assert!(has(&s.bytes, b"ICC-KEPT"));
+        assert_eq!(s.bytes[20], 0x20 | 0x10, "flags match the kept chunks");
+        assert_eq!(u32::from_le_bytes([s.bytes[4], s.bytes[5], s.bytes[6], s.bytes[7]]) as usize, s.bytes.len() - 8);
+        assert_eq!((s.w, s.h), (Some(800), Some(600)));
+
+        // No ICCP kept: the ICC flag goes too. A frame keeps its image, not what rides inside it
+        let mut frame = vec![0u8; 16];
+        frame.extend(riff(b"VP8L", &[0x2F, 1, 2, 3, 4]));
+        frame.extend(riff(b"XYZW", b"FRAME-CANARY"));
+        let w = webp_file(&[riff(b"VP8X", &vp8x), riff(b"ANIM", &[0; 6]), riff(b"ANMF", &frame), riff(b"EXIF", b"EXIF-CANARY")]);
+        let s = strip(Kind::Webp, &w).unwrap();
+        assert!(!has(&s.bytes, b"CANARY") && !has(&s.bytes, b"XYZW"));
+        assert_eq!(s.bytes[20], 0x10 | 0x02);
+        assert_eq!(u32::from_le_bytes([s.bytes[4], s.bytes[5], s.bytes[6], s.bytes[7]]) as usize, s.bytes.len() - 8);
+        let at = s.bytes.windows(4).position(|x| x == b"ANMF").unwrap();
+        let size = u32::from_le_bytes([s.bytes[at + 4], s.bytes[at + 5], s.bytes[at + 6], s.bytes[at + 7]]) as usize;
+        assert_eq!(size, 16 + 8 + 5 + 1, "the frame's size is rewritten");
+    }
+
+    #[test]
+    fn the_zip_orientation_block_holds_the_turn_and_nothing_else() {
+        let jfif = [0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0];
+        let mut j = vec![0xFF, 0xD8];
+        j.extend_from_slice(&jfif);
+        j.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02, 0x12, 0xFF, 0xD9]);
+        assert_eq!(jpeg_with_orientation(&j, 0), None);
+        assert_eq!(jpeg_with_orientation(b"\x89PNG", 90), None);
+        for (rotate, o) in [(90u16, 6u16), (180, 3), (270, 8)] {
+            let z = jpeg_with_orientation(&j, rotate).unwrap();
+            assert_eq!(&z[..20], &j[..20], "after SOI and JFIF");
+            assert_eq!(&z[20..24], &[0xFF, 0xE1, 0x00, 0x22]);
+            assert_eq!(z.len(), j.len() + 36);
+            assert_eq!(&z[56..], &j[20..]);
+            assert_eq!(tiff_rotate(&z[24..56]), Some(rotate));
+            assert_eq!(&z[24 + 6 + 8 + 2 + 8..24 + 6 + 8 + 2 + 10], &o.to_be_bytes());
+            // Stripping it again gives the same turn back and no Exif
+            let again = strip(Kind::Jpeg, &z).unwrap();
+            assert_eq!(again.rotate, rotate);
+            assert_eq!(again.bytes, j);
+        }
+        let bare = [0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x02, 0x12, 0xFF, 0xD9];
+        assert_eq!(&jpeg_with_orientation(&bare, 90).unwrap()[2..4], &[0xFF, 0xE1], "right after SOI without JFIF");
     }
 }

@@ -433,15 +433,82 @@ async fn location_and_camera_details_never_reach_the_disk_the_wall_or_the_zip() 
         assert_clean("served", &r.bytes);
         assert!(stored.iter().any(|(_, f)| f[..] == r.bytes[..]), "served bytes are the stored file");
     }
-    // The zip
+    // The zip: the JPEG gets back an Exif block with the orientation (6, 90°) and no other tag,
+    // right after JFIF; PNG and WebP come as stored. Without that block, all three are clean.
     let r = send(&t.main, "GET", &format!("/api/pockets/{code}/wall.zip"), B::None, &person()).await;
     assert_eq!(r.status, StatusCode::OK);
-    assert_clean("the zip", &r.bytes);
+    let turn = seg(0xE1, b"Exif\0\0MM\0\x2A\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0");
+    assert_clean("the zip", &without(&r.bytes, &turn));
     let entries = unzip(&r.bytes);
     assert_eq!(entries.len(), 3);
     for (name, bytes) in &entries {
-        assert_clean(name, bytes);
+        if name.ends_with(".jpg") {
+            assert_eq!(&bytes[2..4], &[0xFF, 0xE0], "JFIF still leads");
+            let jfif_end = 4 + u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
+            assert_eq!(&bytes[jfif_end..jfif_end + turn.len()], &turn[..], "{name}: the orientation block follows JFIF");
+            assert_eq!(without(bytes, &turn), *jpg, "{name}: otherwise the stored bytes");
+        } else {
+            assert!(stored.iter().any(|(_, f)| f == bytes), "{name}: PNG and WebP as stored");
+        }
+        assert_clean(name, &without(bytes, &turn));
     }
+}
+
+/// `hay` with every `needle` taken out.
+fn without(hay: &[u8], needle: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(hay.len());
+    let mut i = 0;
+    while i < hay.len() {
+        if hay[i..].starts_with(needle) {
+            i += needle.len();
+        } else {
+            out.push(hay[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// pa14 QA F1 (Rigel's repro in #1140): PNG and WebP keep only the chunks on their lists, so a
+/// C2PA block or a maker's own chunk never reaches the disk, and the WebP flags match what's left.
+/// ICC colour profiles stay on purpose.
+#[tokio::test]
+async fn png_and_webp_keep_only_their_listed_chunks() {
+    let t = setup().await;
+    let (code, _) = make(&t, spec(json!({}))).await;
+    let (_, a) = joined(&t, &code, "Ana").await;
+    let mut p = b"\x89PNG\r\n\x1a\n".to_vec();
+    p.extend(chunk(b"IHDR", &[0, 0, 0, 3, 0, 0, 0, 2, 8, 2, 0, 0, 0]));
+    p.extend(chunk(b"iCCP", b"ICC-KEPT\0\0x"));
+    p.extend(chunk(b"caBX", b"jumb-C2PA-GPS-CANARY 46.0569N 14.5058E"));
+    p.extend(chunk(b"prVt", b"PRIVATE-CANARY"));
+    p.extend(chunk(b"IDAT", &[0x78, 0x9C, 0x63, 0x60, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01]));
+    p.extend(chunk(b"IEND", &[]));
+    let r = upload(&t, &code, &a, &p).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    // VP8X says ICC, alpha, EXIF, XMP; the file has ICC, the image and a C2PA chunk
+    let mut vp8x = vec![0x20 | 0x10 | 0x08 | 0x04, 0, 0, 0];
+    vp8x.extend(&799u32.to_le_bytes()[..3]);
+    vp8x.extend(&599u32.to_le_bytes()[..3]);
+    let mut body = b"WEBP".to_vec();
+    body.extend(riff_chunk(b"VP8X", &vp8x));
+    body.extend(riff_chunk(b"ICCP", b"ICC-KEPT"));
+    body.extend(riff_chunk(b"VP8L", &[0x2F, 0x1F, 0xC0, 0x95, 0x00, 0x07, 0x10, 0x11]));
+    body.extend(riff_chunk(b"C2PA", b"WEBP-C2PA-GPS-CANARY 46.0569N"));
+    let mut w = b"RIFF".to_vec();
+    w.extend((body.len() as u32).to_le_bytes());
+    w.extend(body);
+    let r = upload(&t, &code, &a, &w).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let stored = files(&t, &code);
+    assert_eq!(stored.len(), 2);
+    for (name, bytes) in &stored {
+        assert!(!has(bytes, b"CANARY") && !has(bytes, b"caBX") && !has(bytes, b"prVt") && !has(bytes, b"C2PA"), "{name} kept an unlisted chunk");
+        assert!(has(bytes, b"ICC-KEPT"), "{name}: ICC stays on purpose");
+    }
+    let wp = &stored.iter().find(|f| f.0.ends_with(".webp")).unwrap().1;
+    assert_eq!(wp[20], 0x20 | 0x10, "VP8X says ICC and alpha only");
+    assert_eq!(u32::from_le_bytes([wp[4], wp[5], wp[6], wp[7]]) as usize, wp.len() - 8, "the RIFF size is right");
 }
 
 // ---- Who sees what ----
