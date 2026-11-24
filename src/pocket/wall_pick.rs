@@ -321,9 +321,17 @@ async fn zone_and_origin(state: &AppState, s: &Snapshot) -> (Zone, Option<Origin
     (zone, origin_for(s, sched.as_ref()))
 }
 
+/// When the pocket's photos leave this box: its `expires_at` once it has ended, else (uploads
+/// stopped at `closes_at` but nobody ended the wall yet, so the pocket has no `expires_at`) the
+/// stop plus [`wall::KEEP_DAYS`], the rule the guests' keep line uses. The pick only runs after
+/// the stop, so its lines always have a date (CI at d86a9d2d: they came out without one).
+fn leaves_at(expires_at: Option<DateTime<Utc>>, stopped: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+    expires_at.or_else(|| stopped.map(|t| t + chrono::Duration::days(wall::KEEP_DAYS)))
+}
+
 /// The day the pocket's photos leave this box, on the person's clock (as in the state-8 line).
 fn leaves_on(zone: &Zone, s: &Snapshot) -> Option<String> {
-    s.row.expires_at.map(|t| local_date(zone, t))
+    leaves_at(s.row.expires_at, stopped_at(s)).map(|t| local_date(zone, t))
 }
 
 async fn say_ready(state: &AppState, code: &str, n: usize, all: bool) {
@@ -495,6 +503,19 @@ mod tests {
 
     fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
+    }
+
+    #[test]
+    fn the_leave_date_is_expires_at_else_the_stop_plus_the_keep_days() {
+        let closed = utc(2026, 11, 28, 12, 0);
+        let ended = utc(2026, 11, 29, 8, 0);
+        // Ended: the pocket's own expires_at wins
+        assert_eq!(leaves_at(Some(ended + chrono::Duration::days(30)), Some(closed)), Some(utc(2026, 12, 29, 8, 0)));
+        // Closed by closes_at, not ended yet: the stop plus 30 days, the guests' keep line
+        assert_eq!(leaves_at(None, Some(closed)), Some(utc(2026, 12, 28, 12, 0)));
+        assert_eq!(local_date(&Zone::parse("UTC"), leaves_at(None, Some(closed)).unwrap()), "Dec 28");
+        // Neither: no date, and the lines drop the sentence
+        assert_eq!(leaves_at(None, None), None);
     }
 
     #[test]

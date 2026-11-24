@@ -336,16 +336,18 @@ async fn tries_used_up_says_it_couldnt_pick() {
     let w = wall_with(&env, Some(&env.a), 35).await;
     plant(&env, &env.a, &call_tool_marker(PROPOSE, json!({ "code": w.code, "ids": &w.ids[..30] }))).await;
     leave_picking(&env, &w.code, 2).await;
+    // The server that comes back up (the leftover was written under the old one's cache)
+    let again = restart(&env).await;
     let at = morning_after(w.closes);
-    schedule::run_once(&env.state, at).await;
+    schedule::run_once(&again, at).await;
     let line = wait_reply(&env, &env.a, "I couldn't pick the best 30 from Mia & Sam").await;
     assert!(line.text.contains("All the photos leave this box on"), "{}", line.text);
-    schedule::run_once(&env.state, at + Duration::hours(1)).await;
+    schedule::run_once(&again, at + Duration::hours(1)).await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(turns(&w.code), 0, "no third try");
     let lines = common::messages(&env, &env.a).await;
     assert_eq!(lines.iter().filter(|m| m.text.contains("I couldn't pick the best 30")).count(), 1, "said once");
-    let h = host(&env, &w.code).await;
+    let h = view(&again, &w.code, &Viewer::Host).await;
     assert_eq!(h["picking"], false, "{h}");
     assert!(ids_of(&h["proposed_best"]).is_empty());
 }
