@@ -145,7 +145,7 @@ test('35a: the Mistral card names the account "Mistral", says how it is paid, an
   assert.ok(radio('Mistral'), 'a Mistral card next to Anthropic, OpenAI and xAI');
   flushSync(() => radio('Mistral').click());
   assert.equal(q.name().value, 'Mistral');
-  assert.match(panel.textContent, /Paid per use on your Mistral account, or free on its Experiment plan\. The key stays on this computer\./);
+  assert.match(panel.textContent, /Paid per use on your Mistral account\. Mistral's free plan is too limited for bots\. The key stays on this computer\./);
   flushSync(() => typeInto(q.key(), 'mistral-test-key'));
   flushSync(() => q.add().click());
   await settle();
