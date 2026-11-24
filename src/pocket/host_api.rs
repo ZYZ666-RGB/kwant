@@ -21,12 +21,14 @@
 //!   through a quick tunnel (pa6, Pocket API v1.2). 409 `no_quick_tunnel` for a long-lived kit,
 //!   `pocket_ended`, `guest_port_closed`. It starts in the background: `join.tunnel.state`
 //!   goes `starting` → `on` or `failed`
+//! - `GET    /api/pockets/:code/wall.zip`  the Wall's approved photos as one zip (pa14; `?all=1`
+//!   adds the ones still waiting). 404 `not_a_wall` for any other kit
 //! - `DELETE /api/pockets/:code`           204, final
 
 use super::kits::Viewer;
 use super::{keys, PResult, PocketError, Snapshot};
 use crate::server::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -45,6 +47,31 @@ pub fn router() -> Router<AppState> {
         .route("/api/pockets/:code/action", post(action))
         .route("/api/pockets/:code/remove", post(remove))
         .route("/api/pockets/:code/reset-pin", post(reset_pin))
+        .route("/api/pockets/:code/wall.zip", get(wall_zip))
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ZipQuery {
+    #[serde(default)]
+    pub all: Option<String>,
+    #[serde(default)]
+    pub best: Option<String>,
+}
+
+/// pa14: the Wall's photos for the person (person-only like every `/api/pockets` path): approved,
+/// `?all=1` with the waiting ones, `?best=1` the best ones only.
+async fn wall_zip(State(state): State<AppState>, Path(code): Path<String>, Query(q): Query<ZipQuery>) -> PResult<Response> {
+    use super::wall::ZipPick;
+    found(&state, &code).await?;
+    let yes = |v: &Option<String>| matches!(v.as_deref(), Some("1" | "true"));
+    let pick = if yes(&q.best) {
+        ZipPick::Best
+    } else if yes(&q.all) {
+        ZipPick::All
+    } else {
+        ZipPick::Approved
+    };
+    super::wall::zip_response(&state, &code, pick).await
 }
 
 fn off() -> PocketError {
