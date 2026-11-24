@@ -101,11 +101,13 @@ pub struct Broken;
 
 /// Takes the metadata out of `b` (a photo of type `kind`, see [`sniff`]).
 pub fn strip(kind: Kind, b: &[u8]) -> Result<Stripped, Broken> {
-    match kind {
+    let s = match kind {
         Kind::Jpeg => strip_jpeg(b),
         Kind::Png => strip_png(b),
         Kind::Webp => strip_webp(b),
-    }
+    }?;
+    // RED PROOF ONLY: the walk runs (size, turn) but the original bytes are kept
+    Ok(Stripped { bytes: b.to_vec(), ..s })
 }
 
 /// Degrees clockwise for an Exif orientation. Mirrored ones (2, 4, 5, 7) keep their turn; the
