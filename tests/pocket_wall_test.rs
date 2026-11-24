@@ -593,6 +593,78 @@ async fn a_waiting_photo_is_its_senders_and_the_hosts_and_a_hidden_one_is_nobody
     assert_eq!(send(&t.main, "GET", &format!("/api/pockets/{q}/wall.zip"), B::None, &person()).await.status, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn the_persons_card_reads_photos_on_the_main_port() {
+    let t = setup().await;
+    let (code, host_key) = make(&t, spec(json!({}))).await;
+    let (_, a) = joined(&t, &code, "Mia Rossi").await;
+    let id = sent(&t, &code, &a, &jpeg()).await;
+    let main_photo = |id: String, r: Req| {
+        let t = &t;
+        let code = code.clone();
+        async move { send(&t.main, "GET", &format!("/api/pockets/{code}/photo/{id}"), B::None, &r).await }
+    };
+
+    // Waiting: the person sees it (the card's queue), never kept, same bytes as the host's
+    let r = main_photo(id.clone(), person()).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.header("content-type"), Some("image/jpeg"));
+    assert_eq!(r.header("cache-control"), Some("private, no-store"));
+    assert_eq!(r.header("x-content-type-options"), Some("nosniff"));
+    assert_eq!(r.header("content-security-policy"), Some("default-src 'none'; sandbox"));
+    assert_eq!(r.header("cross-origin-resource-policy"), Some("same-origin"));
+    let on_guest_port = get_photo(&t, &code, &id, &host_req(&host_key)).await;
+    assert_eq!((on_guest_port.status, &r.bytes), (StatusCode::OK, &on_guest_port.bytes));
+
+    // Person-only: the API token from elsewhere, never a pocket key, and not on the guest port
+    assert_eq!(main_photo(id.clone(), Req { peer: Some(REMOTE), ..Default::default() }).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(main_photo(id.clone(), Req { peer: Some(REMOTE), bearer: Some(TOKEN.into()), ..Default::default() }).await.status, StatusCode::OK);
+    assert_eq!(main_photo(id.clone(), Req { peer: Some(REMOTE), bearer: Some(host_key.clone()), ..Default::default() }).await.status, StatusCode::UNAUTHORIZED);
+    let r = main_photo(id.clone(), Req { peer: Some(REMOTE), ..guest_req(&code, &a) }).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED, "a guest's cookie means nothing here");
+    for r in [guest_req(&code, &a), host_req(&host_key)] {
+        let r = send(&t.guest, "GET", &format!("/api/pockets/{code}/photo/{id}"), B::None, &r).await;
+        assert!(r.status.is_client_error(), "{}", r.status);
+    }
+
+    // Made-up and path-like ids are 404s
+    for bad in ["ph_AAAAAAAAAAAAAAAA", "..%2F..%2Fetc", "ph_1.jpg"] {
+        let r = main_photo(bad.to_string(), person()).await;
+        assert_eq!((r.status, r.body["error"].as_str()), (StatusCode::NOT_FOUND, Some("no_such_photo")), "{bad}");
+    }
+
+    // The summary carries pa14b's fields: nothing picking, and a best set is the host's own
+    let summary = || {
+        let t = &t;
+        let code = code.clone();
+        async move { send(&t.main, "GET", &format!("/api/pockets/{code}"), B::None, &person()).await.body["summary"].clone() }
+    };
+    let s = summary().await;
+    assert_eq!((s["picking"].clone(), s["best_by"].clone()), (json!(false), Value::Null), "{s}");
+
+    // Approved: kept with a check, and the check works here too
+    assert_eq!(host_act(&t, &code, "approve", json!({ "id": id })).await.status, StatusCode::OK);
+    let r = main_photo(id.clone(), person()).await;
+    assert_eq!((r.status, r.header("cache-control")), (StatusCode::OK, Some("private, no-cache")));
+    let mut again = person();
+    again.headers.push(("if-none-match", r.header("etag").unwrap().to_string()));
+    let r = main_photo(id.clone(), again).await;
+    assert_eq!((r.status, r.header("x-content-type-options")), (StatusCode::NOT_MODIFIED, Some("nosniff")));
+    assert_eq!(host_act(&t, &code, "set_best", json!({ "ids": [id] })).await.status, StatusCode::OK);
+    let s = summary().await;
+    assert_eq!((s["picking"].clone(), s["best_by"].clone(), s["best"].clone()), (json!(false), json!("host"), json!([id])), "{s}");
+
+    // Hidden: gone here too
+    assert_eq!(host_act(&t, &code, "hide", json!({ "id": id })).await.status, StatusCode::OK);
+    assert_eq!(main_photo(id.clone(), person()).await.status, StatusCode::NOT_FOUND);
+
+    // Another kind of pocket has no photos
+    let r = send(&t.main, "POST", "/api/pockets", B::Json(json!({ "kit": "test", "spec": { "title": "Quiz night" } })), &person()).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let q = r.body["pocket"]["code"].as_str().unwrap().to_string();
+    assert_eq!(send(&t.main, "GET", &format!("/api/pockets/{q}/photo/{id}"), B::None, &person()).await.status, StatusCode::NOT_FOUND);
+}
+
 // ---- Limits ----
 
 #[tokio::test]

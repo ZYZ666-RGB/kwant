@@ -313,6 +313,10 @@ impl Wall {
         v["best"] = json!(s.photos.iter().filter(|p| p.best).map(|p| p.id.as_str()).collect::<Vec<_>>());
         v["best_max"] = json!(BEST_MAX);
         v["keep_days"] = json!(KEEP_DAYS);
+        // pa14b's fields, ahead of it: no check picks yet, so a best set is always the host's own
+        // (the card's "Your best", no Picked sticker) and nothing is ever being picked
+        v["best_by"] = if s.photos.iter().any(|p| p.best) { json!("host") } else { Value::Null };
+        v["picking"] = json!(false);
         v
     }
 
