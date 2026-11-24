@@ -378,6 +378,20 @@ pub async fn create(state: &AppState, req: CreateRequest) -> PResult<(Arc<Snapsh
     Err(PocketError::internal())
 }
 
+/// How long a pocket that keeps nothing after it ends (`Retention::AtEnd`, a class quiz) may stay
+/// open with no closing time before the minute tick ends it for the host (pa11 qa F1): a lesson
+/// is long over by then, and a quiz nobody pressed End on must not keep its players for good.
+pub const AT_END_MAX_OPEN: chrono::Duration = chrono::Duration::hours(12);
+
+/// `true` for an open `AtEnd` pocket with no closing time that opened [`AT_END_MAX_OPEN`] or more
+/// before `now`. A pocket with a closing time is ended at that time instead.
+pub fn abandoned(s: &Snapshot, now: DateTime<Utc>) -> bool {
+    s.row.state == OPEN
+        && s.row.closes_at.is_none()
+        && s.rules().is_some_and(|r| matches!(r.retention, kits::Retention::AtEnd))
+        && s.row.opens_at.unwrap_or(s.row.created_at).max(s.row.created_at) + AT_END_MAX_OPEN <= now
+}
+
 /// Ends an open pocket and sets when its data goes (from the kit's retention).
 pub async fn end(state: &AppState, code: &str) -> PResult<Arc<Snapshot>> {
     let lock = state.pocket.lock_for(code);
