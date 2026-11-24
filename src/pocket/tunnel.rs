@@ -541,6 +541,12 @@ pub fn refusal(s: &super::Snapshot) -> Option<(&'static str, &'static str)> {
     if s.kit().is_none_or(|k| k.stable_address_only()) {
         return Some(("no_quick_tunnel", "This pocket runs for weeks, so it needs an address that stays the same. A quick link isn't offered for it."));
     }
+    if s.rules().is_some_and(|r| r.max_players > super::kits::DEFAULT_MAX_PLAYERS) {
+        return Some((
+            "needs_stable_address",
+            "A quick link takes up to 60 players, so this one needs an address that stays the same: your own https, Tailscale Funnel or Same Wi-Fi.",
+        ));
+    }
     if s.row.state != crate::db::pocket::OPEN {
         return Some(("pocket_ended", "This pocket has ended."));
     }

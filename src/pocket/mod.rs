@@ -209,7 +209,7 @@ pub type PResult<T> = Result<T, PocketError>;
 
 fn effective_rules(kit: &dyn Kit, spec: &Value) -> KitRules {
     let mut r = kit.rules(spec);
-    r.max_players = r.max_players.clamp(1, kits::DEFAULT_MAX_PLAYERS);
+    r.max_players = r.max_players.clamp(1, kit.player_ceiling(spec).min(kits::STABLE_MAX_PLAYERS));
     r
 }
 
@@ -266,6 +266,8 @@ pub fn pocket_json(s: &Snapshot) -> Value {
         "max_players": rules.as_ref().map(|r| r.max_players),
         "needs_pin": rules.as_ref().is_some_and(|r| r.needs_pin),
         "retention": rules.as_ref().map(|r| r.retention.describe()),
+        "first_names_only": s.kit().is_some_and(|k| k.first_names_only(&s.spec)),
+        "notice": s.kit().and_then(|k| k.notice(&s.spec)),
     })
 }
 
@@ -580,6 +582,9 @@ pub async fn join(state: &AppState, code: &str, req: JoinRequest) -> PResult<(Pl
     let rules = effective_rules(kit, &s.spec);
     let now = Utc::now();
     open_check(&s, now)?;
+    if kit.first_names_only(&s.spec) {
+        words::first_name_only(&name).map_err(|e| PocketError::new(StatusCode::BAD_REQUEST, e.code(), e.message()))?;
+    }
     let pin = match (rules.needs_pin, req.pin.as_deref()) {
         (true, Some(p)) if keys::valid_pin(p) => Some(p),
         (true, _) => return Err(PocketError::new(StatusCode::BAD_REQUEST, "pin_required", "Pick a 4-digit PIN.")),
