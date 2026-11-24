@@ -70,8 +70,11 @@ pub enum EngineId {
     Ollama,
     /// The space's Custom API accounts (OpenAI-compatible or Anthropic-compatible servers).
     CustomApi,
-    /// 35a: Mistral's API (api.mistral.ai), the only engine of the `mistral` family until 35b.
+    /// 35a: Mistral's API (api.mistral.ai).
     MistralApi,
+    /// 35b: Mistral's Vibe CLI (`vibe`), the `mistral` family's CLI.
+    #[serde(rename = "vibe")]
+    MistralVibe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -159,7 +162,7 @@ pub fn codex_tier(slug: &str, description: Option<&str>) -> Option<Tier> {
 
 impl EngineId {
     /// Every engine, in the order the API lists them.
-    pub const ALL: [EngineId; 9] = [
+    pub const ALL: [EngineId; 10] = [
         EngineId::Claude,
         EngineId::Codex,
         EngineId::Grok,
@@ -169,6 +172,7 @@ impl EngineId {
         EngineId::Ollama,
         EngineId::CustomApi,
         EngineId::MistralApi,
+        EngineId::MistralVibe,
     ];
 
     pub fn name(self) -> &'static str {
@@ -182,12 +186,13 @@ impl EngineId {
             EngineId::Ollama => "Ollama",
             EngineId::CustomApi => "Custom API",
             EngineId::MistralApi => "Mistral API",
+            EngineId::MistralVibe => "Mistral Vibe CLI",
         }
     }
 
     pub fn kind(self) -> EngineKind {
         match self {
-            EngineId::Claude | EngineId::Codex | EngineId::Grok => EngineKind::Cli,
+            EngineId::Claude | EngineId::Codex | EngineId::Grok | EngineId::MistralVibe => EngineKind::Cli,
             EngineId::AnthropicApi
             | EngineId::OpenaiApi
             | EngineId::XaiApi
@@ -209,6 +214,7 @@ impl EngineId {
             EngineId::Ollama => "ollama",
             EngineId::CustomApi => "custom_api",
             EngineId::MistralApi => "mistral_api",
+            EngineId::MistralVibe => "vibe",
         }
     }
 
@@ -223,20 +229,19 @@ impl EngineId {
             EngineId::Codex | EngineId::OpenaiApi => Some(Engine::Codex),
             EngineId::Grok | EngineId::XaiApi => Some(Engine::Grok),
             EngineId::CustomApi => Some(Engine::Custom),
-            EngineId::MistralApi => Some(Engine::Mistral),
+            EngineId::MistralApi | EngineId::MistralVibe => Some(Engine::Mistral),
             EngineId::Ollama => None,
         }
     }
 
-    /// For Custom API both are [`EngineId::CustomApi`] and for Mistral both are
-    /// [`EngineId::MistralApi`]: neither has a CLI (35b adds Mistral's).
+    /// For Custom API both are [`EngineId::CustomApi`]: it has no CLI.
     pub fn of_family(engine: Engine) -> (EngineId, EngineId) {
         match engine {
             Engine::Claude => (EngineId::Claude, EngineId::AnthropicApi),
             Engine::Codex => (EngineId::Codex, EngineId::OpenaiApi),
             Engine::Grok => (EngineId::Grok, EngineId::XaiApi),
             Engine::Custom => (EngineId::CustomApi, EngineId::CustomApi),
-            Engine::Mistral => (EngineId::MistralApi, EngineId::MistralApi),
+            Engine::Mistral => (EngineId::MistralVibe, EngineId::MistralApi),
         }
     }
 }
@@ -349,6 +354,7 @@ pub struct ProbeEnv {
     pub claude_config_dir: Option<std::path::PathBuf>,
     pub codex_bin: Option<String>,
     pub grok_bin: Option<String>,
+    pub vibe_bin: Option<String>,
     pub anthropic_key: Option<String>,
     pub openai_key: Option<String>,
     pub xai_key: Option<String>,
@@ -385,6 +391,7 @@ impl ProbeEnv {
             claude_config_dir: None,
             codex_bin: super::find_cli_binary("codex"),
             grok_bin: super::find_cli_binary("grok"),
+            vibe_bin: super::find_cli_binary("vibe"),
             anthropic_key: key(db, "anthropic_api_key", "ANTHROPIC_API_KEY").await,
             openai_key: key(db, "openai_api_key", "OPENAI_API_KEY").await,
             xai_key: key(db, "xai_api_key", "XAI_API_KEY").await,
@@ -411,6 +418,7 @@ pub async fn probe_within(id: EngineId, env: &ProbeEnv, limit: Duration) -> Prob
             EngineId::Claude => probe_claude(env.claude_bin.as_deref(), env.claude_config_dir.as_deref()).await,
             EngineId::Codex => probe_codex(env.codex_bin.as_deref()).await,
             EngineId::Grok => probe_grok(env.grok_bin.as_deref()).await,
+            EngineId::MistralVibe => probe_vibe(env.vibe_bin.as_deref()).await,
             EngineId::AnthropicApi | EngineId::OpenaiApi | EngineId::XaiApi | EngineId::MistralApi => {
                 probe_api(id, env).await
             }
@@ -627,6 +635,38 @@ async fn probe_grok(bin: Option<&str>) -> Probe {
         Probe::ready("Signed in", models)
     };
     probe.with_version(version)
+}
+
+/// Vibe has no sign-in status command: it's ready when it runs and a Mistral key is where
+/// `vibe --setup` puts it (or in kwnt's env). The key isn't tried, so a check costs nothing.
+async fn probe_vibe(bin: Option<&str>) -> Probe {
+    let Some(bin) = bin else {
+        return Probe::not_installed("Mistral Vibe CLI isn't installed");
+    };
+    let out = match run(bin, &["--version"]).await {
+        Ok(o) => o,
+        Err(e) => return Probe::error(e),
+    };
+    if !out.success {
+        return Probe::error(format!("Couldn't check: {}", failure_line(&out)));
+    }
+    let version = parse_vibe_version(&out.stdout);
+    let home = super::vibe::user_vibe_home();
+    let probe = match super::vibe::find_key(home.as_deref()).await {
+        Some((_, source)) => Probe::ready(format!("Signed in ({})", source.label()), mistral_fallback_models()),
+        None => Probe::signed_out("No Mistral API key: run `vibe --setup`"),
+    };
+    match version {
+        Some(v) => probe.with_version(Some(v)),
+        None => probe,
+    }
+}
+
+/// `vibe --version` prints `vibe 3.1.4`.
+fn parse_vibe_version(stdout: &str) -> Option<String> {
+    let v = stdout.trim().strip_prefix("vibe")?.trim();
+    (!v.is_empty() && v.len() <= 32 && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')))
+        .then(|| v.to_string())
 }
 
 /// Chat models in a provider's `GET /v1/models` reply, newest first, default marked.
@@ -1255,8 +1295,8 @@ pub fn system_route(
             return Ok(SystemRoute::Api { engine: api, key });
         }
     }
-    // An API-only family (Mistral until 35b) has no CLI to fall back on
-    if let Some(bin) = (cli != api).then(|| find_bin(family.as_str())).flatten() {
+    // An API-only family (Custom) has no CLI to fall back on
+    if let Some(bin) = (cli != api).then(|| find_bin(cli.as_str())).flatten() {
         if engines.usable(cli, true) {
             return Ok(SystemRoute::Cli { engine: cli, bin });
         }
@@ -1692,14 +1732,26 @@ mod tests {
         assert!(fallback[1].default);
     }
 
-    /// 35a: Mistral is its own family, API only.
+    /// 35a: Mistral is its own family; 35b gives it the Vibe CLI.
     #[test]
-    fn mistral_is_an_api_only_family() {
+    fn mistral_is_its_own_family() {
         assert_eq!(EngineId::MistralApi.as_str(), "mistral_api");
         assert_eq!(EngineId::MistralApi.name(), "Mistral API");
         assert_eq!(EngineId::MistralApi.kind(), EngineKind::Api);
         assert_eq!(EngineId::MistralApi.family(), Some(Engine::Mistral));
-        assert_eq!(EngineId::of_family(Engine::Mistral), (EngineId::MistralApi, EngineId::MistralApi));
+        assert_eq!(EngineId::of_family(Engine::Mistral), (EngineId::MistralVibe, EngineId::MistralApi));
         assert!(EngineId::ALL.contains(&EngineId::MistralApi));
+        assert_eq!(EngineId::MistralVibe.name(), "Mistral Vibe CLI");
+        assert_eq!(EngineId::MistralVibe.family(), Some(Engine::Mistral));
+        assert_eq!(serde_json::to_value(EngineId::MistralVibe).unwrap(), "vibe");
+        assert_eq!(EngineId::ALL.len(), 10);
+    }
+
+    #[test]
+    fn vibe_version_is_read_from_its_banner() {
+        assert_eq!(parse_vibe_version("vibe 3.1.4\n").as_deref(), Some("3.1.4"));
+        assert_eq!(parse_vibe_version("something else"), None);
+        assert_eq!(parse_vibe_version("vibe "), None);
+        assert_eq!(parse_vibe_version("vibe 1 2; rm"), None);
     }
 }
