@@ -222,13 +222,13 @@ impl EngineId {
         Self::ALL.into_iter().find(|e| e.as_str() == id)
     }
 
-    /// The model family it runs (`None` for Ollama).
     /// Runs any model id its provider has, also one its list lacks: Vibe defines a pinned
     /// model on the fly (`VIBE_MODELS`), so a pin is never swapped for another model.
     pub fn runs_unlisted_pins(self) -> bool {
         matches!(self, EngineId::MistralVibe)
     }
 
+    /// The model family it runs (`None` for Ollama).
     pub fn family(self) -> Option<Engine> {
         match self {
             EngineId::Claude | EngineId::AnthropicApi => Some(Engine::Claude),

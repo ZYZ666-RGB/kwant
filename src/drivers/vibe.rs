@@ -1208,8 +1208,7 @@ mod tests {
         assert!(failover(Some(0), None, "").is_none());
     }
 
-    /// Rigel's live check: one 429 on a free key held the engine for an hour. A 429 is a rate
-    /// limit: its Retry-After, else a short hold; only a spent quota or billing gets the hour.
+    /// Rigel's live check: a pin Vibe can't take must refuse the turn, never run Vibe's default.
     #[test]
     fn a_model_vibe_cant_take_is_refused_in_plain_words() {
         for good in ["ministral-3b-latest", "mistral-medium-3.5", "codestral-latest"] {
@@ -1222,6 +1221,8 @@ mod tests {
         }
     }
 
+    /// Rigel's live check: one 429 on a free key held the engine for an hour. A 429 is a rate
+    /// limit: its Retry-After, else a short hold; only a spent quota or billing gets the hour.
     #[test]
     fn a_rate_limit_holds_the_account_briefly_and_a_spent_quota_for_long() {
         use crate::profiles::FailClass;
