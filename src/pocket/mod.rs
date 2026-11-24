@@ -12,6 +12,7 @@
 //! each of whom then draws its own view from the snapshot.
 
 pub mod address;
+pub mod desk;
 pub mod gather;
 pub mod guest;
 pub mod host_api;
@@ -267,7 +268,9 @@ async fn changed(state: &AppState, code: &str) -> PResult<()> {
 /// The public facts about a pocket (no names, no guest text): for the join page and the card.
 pub fn pocket_json(s: &Snapshot) -> Value {
     let rules = s.rules();
-    json!({
+    // pa13a: a front desk guest never learns how many other guests there are
+    let private = s.kit().is_some_and(|k| k.private_guests());
+    let mut out = json!({
         "code": s.row.code,
         "kit": s.row.kit,
         "title": s.row.title,
@@ -282,7 +285,12 @@ pub fn pocket_json(s: &Snapshot) -> Value {
         "retention": rules.as_ref().map(|r| r.retention.describe()),
         "first_names_only": s.kit().is_some_and(|k| k.first_names_only(&s.spec)),
         "notice": s.kit().and_then(|k| k.notice(&s.spec)),
-    })
+    });
+    if private {
+        out["players"] = Value::Null;
+        out["max_players"] = Value::Null;
+    }
+    out
 }
 
 /// What one viewer gets, the same over `state` and `ws`: `{api, version, pocket, me, view}`.
@@ -313,6 +321,21 @@ pub fn view_json(s: &Snapshot, viewer: &Viewer, now: DateTime<Utc>) -> Value {
     })
 }
 
+/// pa13a: one part of the host's view by key (`guest:<id>`: a front desk conversation), for the
+/// remote and the person's card: `{api, version, ...the kit's part}`; 404 when there's no such part.
+pub fn host_detail_json(s: &Snapshot, key: &str, now: DateTime<Utc>) -> PResult<Value> {
+    let kit = s.kit().ok_or_else(PocketError::not_found)?;
+    let ctx = KitCtx::new(&s.spec, &s.players, now);
+    let mut part = kit
+        .host_detail(&ctx, &s.kit_state, key)
+        .ok_or_else(|| PocketError::new(StatusCode::NOT_FOUND, "no_such_player", "That player isn't in this pocket."))?;
+    if let Some(o) = part.as_object_mut() {
+        o.insert("api".into(), json!(API_VERSION));
+        o.insert("version".into(), json!(s.row.version));
+    }
+    Ok(part)
+}
+
 // ---- Creating and ending (the person's side) ----
 
 /// What the bot or the person asks for (`POST /api/pockets`, and pa3's tools).
@@ -333,8 +356,11 @@ pub struct CreateRequest {
 }
 
 /// Makes a pocket; returns it and its host key (shown once, kept only as a hash).
-pub async fn create(state: &AppState, req: CreateRequest) -> PResult<(Arc<Snapshot>, String)> {
+pub async fn create(state: &AppState, mut req: CreateRequest) -> PResult<(Arc<Snapshot>, String)> {
     let kit = kits::kit(&req.kit).ok_or_else(|| PocketError::new(StatusCode::BAD_REQUEST, "unknown_kit", format!("There's no kit called {:?}.", req.kit)))?;
+    if kit.answer_bot() {
+        fill_answer_bot(state, &mut req).await?;
+    }
     let spec_text = serde_json::to_string(&req.spec).map_err(|_| PocketError::internal())?;
     if spec_text.len() > MAX_SPEC_BYTES {
         return Err(PocketError::new(StatusCode::PAYLOAD_TOO_LARGE, "spec_too_big", "The spec is bigger than 256 KB."));
@@ -392,6 +418,21 @@ pub async fn create(state: &AppState, req: CreateRequest) -> PResult<(Arc<Snapsh
     Err(PocketError::internal())
 }
 
+/// pa13a: a kit whose guests a bot answers (the front desk) needs that bot: the spec's
+/// `answer_bot`, else the bot that made the pocket. The spec then holds its id and its face
+/// (`bot: {name, sprite}`) for the views; guests never see the id.
+async fn fill_answer_bot(state: &AppState, req: &mut CreateRequest) -> PResult<()> {
+    let id = req.spec.get("answer_bot").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).or_else(|| req.owner_kwant_id.clone());
+    let needs_bot = || PocketError::new(StatusCode::BAD_REQUEST, "needs_bot", "Pick the bot that answers guests (answer_bot).");
+    let id = id.ok_or_else(needs_bot)?;
+    let bot = state.db.get_kwant(&id).await?.ok_or_else(needs_bot)?;
+    if let Some(spec) = req.spec.as_object_mut() {
+        spec.insert("answer_bot".into(), json!(bot.id));
+        spec.insert("bot".into(), json!({ "name": bot.name, "sprite": desk::SPRITE }));
+    }
+    Ok(())
+}
+
 /// How long a pocket that keeps nothing after it ends (`Retention::AtEnd`, a class quiz) may stay
 /// open with no closing time before the minute tick ends it for the host (pa11 qa F1): a lesson
 /// is long over by then, and a quiz nobody pressed End on must not keep its players for good.
@@ -447,7 +488,10 @@ pub async fn delete(state: &AppState, code: &str) -> PResult<bool> {
     let lock = state.pocket.lock_for(code);
     let gone = {
         let _g = lock.lock().await;
+        // pa13a: the bot's conversations with the guests go with the pocket
+        let threads = snapshot(state, code).await?.and_then(|s| s.kit().map(|k| k.owned_threads(&s.kit_state))).unwrap_or_default();
         let gone = state.db.pocket_delete(code).await?;
+        drop_threads(state, &threads).await;
         // pa14: the Wall's photo files go with the pocket
         wall::remove_files(state, code).await;
         gone
@@ -456,6 +500,21 @@ pub async fn delete(state: &AppState, code: &str) -> PResult<bool> {
     state.pocket.signal(code, Signal::Deleted);
     state.pocket.forget(code);
     Ok(gone)
+}
+
+/// pa13a: deletes kwant threads a kit no longer points at (a guest's conversation with the bot).
+async fn drop_threads(state: &AppState, threads: &[String]) {
+    for t in threads {
+        if let Err(e) = state.db.delete_thread_with_messages(t).await {
+            tracing::warn!("pocket apps: couldn't delete a guest's conversation: {e}");
+        }
+    }
+}
+
+/// Threads in `before` but not in `after`.
+fn threads_gone(kit: &dyn Kit, before: &Value, after: &Value) -> Vec<String> {
+    let kept = kit.owned_threads(after);
+    kit.owned_threads(before).into_iter().filter(|t| !kept.contains(t)).collect()
 }
 
 /// A new host key for the remote; the old one stops working at once, and so do host links
@@ -830,6 +889,10 @@ pub async fn act(state: &AppState, code: &str, actor: &Viewer, name: &str, body:
     if matches!(actor, Viewer::Guest(_)) && name == "answer" {
         crate::server::quizmaster_live::after_answer(state, code, kit.id());
     }
+    // pa13a: a guest's message goes to the bot, a host's reply into the bot's thread
+    if kit.id() == desk::ID {
+        crate::server::desk_turns::after_act(state, code, actor, name, body).await;
+    }
     Ok(())
 }
 
@@ -837,6 +900,9 @@ fn kit_refusal(e: KitError) -> PocketError {
     match e {
         KitError::BadInput(m) => PocketError::new(StatusCode::BAD_REQUEST, "bad_action", m),
         KitError::NotNow(m) => PocketError::new(StatusCode::CONFLICT, "not_now", m),
+        KitError::Coded { status, code, message, extra } => {
+            PocketError::new(StatusCode::from_u16(status).unwrap_or(StatusCode::CONFLICT), code, message).with(extra)
+        }
     }
 }
 
@@ -857,6 +923,24 @@ pub async fn judge(state: &AppState, code: &str, body: &Value) -> PResult<()> {
     save(state, code, &kit_state, ctx, now).await
 }
 
+/// pa13a: one step of the server's own work on a pocket (the front desk's bot turns), under the
+/// pocket's lock, saved and pushed like an action. Server side only: no route calls this.
+pub async fn server_event(state: &AppState, code: &str, name: &str, body: &Value) -> PResult<Value> {
+    let lock = state.pocket.lock_for(code);
+    let _g = lock.lock().await;
+    let s = snapshot(state, code).await?.ok_or_else(PocketError::not_found)?;
+    let kit = s.kit().ok_or_else(PocketError::not_found)?;
+    if s.row.state == ENDED {
+        return Err(PocketError::new(StatusCode::GONE, "ended", "This pocket app has ended."));
+    }
+    let now = Utc::now();
+    let mut kit_state = s.kit_state.clone();
+    let mut ctx = KitCtx::new(&s.spec, &s.players, now);
+    let out = kit.server_event(&mut ctx, &mut kit_state, name, body).map_err(kit_refusal)?;
+    save(state, code, &kit_state, ctx, now).await?;
+    Ok(out)
+}
+
 /// The host removes a player: their keys stop working and the kit forgets them.
 pub async fn remove_player(state: &AppState, code: &str, player_id: &str) -> PResult<()> {
     let lock = state.pocket.lock_for(code);
@@ -875,7 +959,36 @@ pub async fn remove_player(state: &AppState, code: &str, player_id: &str) -> PRe
     let mut kit_state = s.kit_state.clone();
     let mut ctx = KitCtx::new(&s.spec, &players, now);
     kit.on_remove(&mut ctx, &mut kit_state, player_id);
-    save(state, code, &kit_state, ctx, now).await
+    let gone = threads_gone(kit, &s.kit_state, &kit_state);
+    save(state, code, &kit_state, ctx, now).await?;
+    drop_threads(state, &gone).await;
+    Ok(())
+}
+
+/// pa13a: forgets the players whose data has expired (a front desk guest 7 days after their last
+/// message): their row, keys, events, the bot's conversation with them and their kit state.
+/// Returns how many went.
+pub async fn forget_idle(state: &AppState, code: &str, now: DateTime<Utc>) -> PResult<usize> {
+    let lock = state.pocket.lock_for(code);
+    let _g = lock.lock().await;
+    let Some(s) = snapshot(state, code).await? else { return Ok(0) };
+    let Some(kit) = s.kit() else { return Ok(0) };
+    let idle = kit.idle_players(&KitCtx::new(&s.spec, &s.players, now), &s.kit_state);
+    if idle.is_empty() {
+        return Ok(0);
+    }
+    let players: Vec<Player> = s.players.iter().filter(|p| !idle.contains(&p.id)).cloned().collect();
+    let mut kit_state = s.kit_state.clone();
+    let mut ctx = KitCtx::new(&s.spec, &players, now);
+    for id in &idle {
+        state.db.pocket_player_forget(code, id).await?;
+        state.pocket.signal(code, Signal::Revoked(id.clone()));
+        kit.on_remove(&mut ctx, &mut kit_state, id);
+    }
+    let gone = threads_gone(kit, &s.kit_state, &kit_state);
+    save(state, code, &kit_state, ctx, now).await?;
+    drop_threads(state, &gone).await;
+    Ok(idle.len())
 }
 
 /// The host's PIN reset: a one-time 4-character code, valid 24 h. The old PIN and every guest key
@@ -954,6 +1067,15 @@ pub async fn sweep(state: &AppState, now: DateTime<Utc>) -> Swept {
         return out;
     }
     tick_unwatched(state, now).await;
+    // pa13a: front desk guests whose data has expired, then turns a restart left queued
+    for code in state.db.pocket_codes_of_kit(desk::ID).await.unwrap_or_default() {
+        match forget_idle(state, &code, now).await {
+            Ok(n) if n > 0 => tracing::info!(count = n, "pocket apps: deleted expired guests' data"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(code = %code, "pocket apps: couldn't delete expired guests: {}", e.code),
+        }
+    }
+    crate::server::desk_turns::resume(state).await;
     for code in state.db.pocket_past_closing(now).await.unwrap_or_default() {
         if end(state, &code).await.is_ok() {
             out.ended += 1;
