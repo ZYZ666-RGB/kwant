@@ -171,8 +171,8 @@ pub enum KeySource {
 impl KeySource {
     pub fn label(self) -> &'static str {
         match self {
-            KeySource::VibeEnvFile => "key in Vibe's .env",
-            KeySource::Keychain => "key in the Keychain",
+            KeySource::VibeEnvFile => "Vibe's .env",
+            KeySource::Keychain => "macOS Keychain",
             KeySource::Env => "MISTRAL_API_KEY",
         }
     }
@@ -670,9 +670,10 @@ pub fn empty_reply_notice(run: &EmptyRun<'_>, secrets: &[String]) -> String {
             }
         };
         return format!(
-            "Vibe stopped without a reply: it wanted to use {}, which kwnt doesn't allow in this chat. \
-             A Vibe bot may only read and edit files in its working folder and use the tools assigned to it \
-             (each through its approval card); shell commands and web fetches are off.",
+            "Vibe stopped without a reply: it asked to use {}, which kwant doesn't allow in this chat. \
+             Vibe can't run shell commands or fetch web pages in kwant. When a chat allows tools, it can read \
+             and edit files in the bot's working folder and use the bot's assigned tools (each one asks first \
+             with an approval card).",
             run.refused.iter().map(|t| label(t)).collect::<Vec<_>>().join(", ")
         );
     }
@@ -720,14 +721,14 @@ pub async fn gateway_tool_names(url: &str, token: &str, timeout: Duration) -> Re
         .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }))
         .send()
         .await
-        .map_err(|e| format!("the gateway didn't answer ({})", e.without_url()))?;
+        .map_err(|e| format!("kwant's tool service didn't answer ({})", e.without_url()))?;
     if !reply.status().is_success() {
-        return Err(format!("the gateway answered {}", reply.status()));
+        return Err(format!("kwant's tool service answered {}", reply.status()));
     }
-    let body: Value = reply.json().await.map_err(|_| "the gateway's tool list wasn't JSON".to_string())?;
+    let body: Value = reply.json().await.map_err(|_| "kwant's tool list couldn't be read".to_string())?;
     let names: Vec<String> = body["result"]["tools"]
         .as_array()
-        .ok_or("the gateway sent no tool list")?
+        .ok_or("kwant's tool service sent no tool list")?
         .iter()
         .filter_map(|t| t["name"].as_str())
         .filter(|n| valid_tool_name(n))
