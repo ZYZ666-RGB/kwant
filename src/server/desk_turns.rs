@@ -147,7 +147,7 @@ async fn run_one(state: &AppState, code: &str, guest: &str, texts: Vec<String>, 
     // cost-per-reply line averages these
     let cost = match &result {
         Ok(_) => match mark {
-            Some(mark) => state.db.reply_cost_after(&thread_id, &kwant.id, mark).await.ok().flatten(),
+            Some(mark) => state.db.reply_cost_after(&thread_id, mark).await.ok().flatten(),
             None => None,
         },
         Err(_) => None,

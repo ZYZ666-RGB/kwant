@@ -441,18 +441,20 @@ impl Database {
         Ok(sqlx::query_scalar("SELECT COALESCE(MAX(rowid), 0) FROM messages WHERE thread_id = ?").bind(thread_id).fetch_one(&self.pool).await?)
     }
 
-    /// pa13a: what `kwant_id`'s replies saved in `thread_id` after `mark` cost, summed over the
+    /// pa13a: what the bot's replies saved in `thread_id` after `mark` cost, summed over the
     /// replies whose engine said (`meta.usage.cost_usd`); `None` when none did. (Row order, not
     /// `created_at`, which has whole seconds only.)
-    pub async fn reply_cost_after(&self, thread_id: &str, kwant_id: &str, mark: i64) -> Result<Option<f64>, DbError> {
+    ///
+    /// No `sender_id` filter: a bot's reply row carries its *name* there (not its id), and the
+    /// thread (a guest's private desk chat) plus the row mark already pick out this turn's reply.
+    pub async fn reply_cost_after(&self, thread_id: &str, mark: i64) -> Result<Option<f64>, DbError> {
         let cost: Option<f64> = sqlx::query_scalar(
             "SELECT SUM(CAST(json_extract(meta, '$.usage.cost_usd') AS REAL)) FROM messages \
-             WHERE thread_id = ? AND rowid > ? AND sender_role = 'kwant' AND sender_id = ? \
+             WHERE thread_id = ? AND rowid > ? AND sender_role = 'kwant' \
                AND meta IS NOT NULL AND json_valid(meta) AND json_type(meta, '$.usage.cost_usd') IN ('real', 'integer')",
         )
         .bind(thread_id)
         .bind(mark)
-        .bind(kwant_id)
         .fetch_one(&self.pool)
         .await?;
         Ok(cost)
