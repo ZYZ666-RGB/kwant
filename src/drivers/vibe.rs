@@ -990,7 +990,7 @@ mod tests {
         assert_eq!(home.path, again.path);
         assert_ne!(home.path, VibeHome::for_thread(base.path(), "k1", "t2").unwrap().path);
         assert_ne!(home.path, VibeHome::for_thread(base.path(), "k2", "t1").unwrap().path);
-        let name = home.path.file_name().unwrap().to_str().unwrap();
+        let name = home.path.file_name().unwrap().to_str().unwrap().to_owned();
         assert!(name.starts_with("kwnt-vibe-") && !name.contains("t1"), "{name}");
         #[cfg(unix)]
         {
