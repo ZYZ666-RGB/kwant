@@ -631,7 +631,7 @@ pub fn retry_after_secs(text: &str) -> Option<u64> {
     let lower = text.to_lowercase();
     ["retry-after", "retry_after", "retry after"].iter().find_map(|name| {
         let rest = &lower[lower.find(name)? + name.len()..];
-        let rest = rest.trim_start_matches(|c: char| matches!(c, ' ' | ':' | '=' | '"' | '\''));
+        let rest = rest.trim_start_matches([' ', ':', '=', '"', '\'']);
         let digits: String = rest.chars().take_while(char::is_ascii_digit).take(9).collect();
         digits.parse::<u64>().ok().map(|s| s.min(MAX_RETRY_AFTER_SECS))
     })
