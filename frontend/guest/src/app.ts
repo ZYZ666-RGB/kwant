@@ -151,6 +151,23 @@ export class GuestApp {
       this.draw();
     }
     this.resend(v);
+    this.askColours();
+  }
+
+  private colourAsk = 0;
+  /**
+   * A quiz state named a team whose colour isn't known (a team made after this phone read `info`, or a seat restored
+   * without the join screen): read the public `info` once for the colours, then the state again. At most every 10 s.
+   */
+  private askColours(): void {
+    if (!this.api.missing || this.gone || this.env.now() - this.colourAsk < 10_000) return;
+    this.colourAsk = this.env.now();
+    void (async () => {
+      const i = await this.api.info();
+      if (!i.ok || this.gone) return;
+      const r = await this.api.state();
+      if (r.ok && r.view && !this.gone) this.show(r.view);
+    })();
   }
 
   /** The box is answering again but this question has no answer from this phone: send the pending one again. */
@@ -1003,6 +1020,14 @@ export class GuestApp {
         h('p', { class: 'soft said' }, 'You wrote ', h('b', null, `"${r.yours ?? ''}"`), `. ${r.why || 'Close enough, so it counts.'}`),
         h('div', { class: 'pts' }, sign(r.points)),
       );
+    } else if (r.outcome === 'judging') {
+      panel = h(
+        'div',
+        { class: 'panel big-result near' },
+        h('div', { class: 'ic sky' }, icon('star', 'pi big')),
+        h('div', { class: 'word' }, 'Close one'),
+        h('p', { class: 'soft said' }, 'You wrote ', h('b', null, `"${r.yours ?? ''}"`), '. Quizmaster is checking whether it counts.'),
+      );
     } else if (r.outcome === 'overturned') {
       panel = h(
         'div',
@@ -1058,7 +1083,8 @@ export class GuestApp {
   private between(v: GuestView): HTMLElement {
     const b = v.between!;
     const mine = b.board.find((r) => r.me);
-    const line = !mine || !mine.move ? (mine ? 'Your team: same place as last round' : '') : `Your team: ${mine.move > 0 ? 'up' : 'down'} ${Math.abs(mine.move)} place${Math.abs(mine.move) === 1 ? '' : 's'} this round`;
+    // Only a move the box sent is told: with none (the quiz engine sends no moves yet) there is no line.
+    const line = !mine || mine.move == null ? '' : !mine.move ? 'Your team: same place as last round' : `Your team: ${mine.move > 0 ? 'up' : 'down'} ${Math.abs(mine.move)} place${Math.abs(mine.move) === 1 ? '' : 's'} this round`;
     const lb = h('div', { class: 'lb', role: 'list' });
     add(lb, b.board.slice(0, 5).map((r) => {
       const el = this.row(r);
