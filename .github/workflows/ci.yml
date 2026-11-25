@@ -28,8 +28,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -51,12 +51,12 @@ jobs:
           node guest/e2e/queue.mjs "$RUNNER_TEMP/guest-shots"
       - name: Guest page shots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: guest-shots
           path: ${{ runner.temp }}/guest-shots
           retention-days: 7
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: frontend-dist
           path: frontend/dist
@@ -68,7 +68,7 @@ jobs:
     name: site
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: check_site.py
         run: python3 scripts/check_site.py
       # latest.json for in-app Mac updates
@@ -84,7 +84,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: docker build --target web
         env:
           DOCKER_BUILDKIT: 1
@@ -103,9 +103,9 @@ jobs:
     needs: frontend
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The binary embeds frontend/dist, so the Rust build needs it
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: frontend-dist
           path: frontend/dist
@@ -115,7 +115,7 @@ jobs:
           key: fresh-machine
       - name: Build kwnt
         run: cargo build --locked --bin kwnt
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
       # Only the driver: the page check uses the runner's own Chrome, no browser download
@@ -137,7 +137,7 @@ jobs:
           node frontend/e2e/native-drop.mjs target/debug/kwnt 9682 "$RUNNER_TEMP/native-drop"
       - name: Native file drop results
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: native-drop
           path: ${{ runner.temp }}/native-drop
@@ -159,7 +159,7 @@ jobs:
           node frontend/e2e/a11y-check.mjs target/debug/kwnt 9684 "$RUNNER_TEMP/a11y-check"
       - name: Accessibility guard results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: a11y-check
           path: ${{ runner.temp }}/a11y-check
@@ -176,7 +176,7 @@ jobs:
         run: python3 scripts/perf_budget.py --kwnt target/debug/kwnt --browser "$(command -v google-chrome || command -v chromium)" --out "$RUNNER_TEMP/perf-results.json"
       - name: Performance budget results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: perf-results
           path: ${{ runner.temp }}/perf-results.json
@@ -193,13 +193,13 @@ jobs:
     env:
       KWNT_TEST_REQUIRE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Test skips go through skip_or_fail
         run: python3 scripts/check_test_skips.py
       - name: Test tools
         run: scripts/ci_docker_tests.sh tools
       # The binary embeds frontend/dist, so the Rust build needs it
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: frontend-dist
           path: frontend/dist
@@ -234,8 +234,8 @@ jobs:
     env:
       KWNT_TEST_REQUIRE: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: frontend-dist
           path: frontend/dist
