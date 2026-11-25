@@ -60,11 +60,10 @@ test('every grid is 9x9 and uses only #, o and .', () => {
   }
 });
 
-// space-icons-2 exceptions, by design (Mira's icons.py, checked at 16-48 px on all 8 colours): the pencil lead of
-// "writing" is the tip itself, "health"'s inner line starts at the heart's notch, and "coffee"'s surface is the
-// cup's open top. Every other glyph keeps 36j's rule.
-const OPEN_DETAIL = new Set(['writing', 'health', 'coffee']);
-test('every detail pixel sits inside main pixels (never floats on the tile), except the two by-design ones', () => {
+// space-icons-2 exception, by design (Mira's design check): "coffee"'s surface is the cup's open top.
+// Every other glyph keeps 36j's rule.
+const OPEN_DETAIL = new Set(['coffee']);
+test('every detail pixel sits inside main pixels (never floats on the tile), except the by-design one', () => {
   for (const g of Object.values(m.SPACE_PIXEL_ICONS)) {
     if (OPEN_DETAIL.has(g.name)) continue;
     g.rows.forEach((r, y) => [...r].forEach((ch, x) => {
