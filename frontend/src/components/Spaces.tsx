@@ -149,6 +149,8 @@ export const SpaceIconPicker: React.FC<{
     gridRef.current?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus();
   };
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // ⌘←/⌘→ (Back/Forward on a Mac), Ctrl and Alt combos belong to the browser and OS.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     const from = Math.max(0, picked);
     const grid = gridRef.current;
     const cols = (grid && getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length) || 8;

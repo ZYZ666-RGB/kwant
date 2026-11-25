@@ -108,6 +108,24 @@ test('arrows, Home and End move the pick; aria-checked and focus follow; up/down
   assert.equal(at(), 'Icon: work');
   assert.equal(legendText(host), 'Icon · Work');
 });
+test('Ctrl, Meta and Alt with an arrow pass through to the browser; a plain arrow still moves the pick', async () => {
+  const host = await newSpace();
+  const at = () => checked(host).getAttribute('aria-label');
+  const start = at();
+  for (const mod of ['metaKey', 'ctrlKey', 'altKey']) {
+    const ev = new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true, [mod]: true });
+    checked(host).dispatchEvent(ev);
+    await settle();
+    assert.equal(at(), start, `${mod}+ArrowRight must not change the icon`);
+    assert.equal(ev.defaultPrevented, false, `${mod}+ArrowRight must not be prevented`);
+  }
+  const plain = new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true });
+  checked(host).dispatchEvent(plain);
+  await settle();
+  assert.notEqual(at(), start);
+  assert.equal(plain.defaultPrevented, true);
+});
+
 const legendText = (host) => host.querySelector('legend').textContent;
 
 test('foil ring: only the picked button and the preview tile wear it', async () => {
