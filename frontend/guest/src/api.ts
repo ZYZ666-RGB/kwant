@@ -286,8 +286,9 @@ export class Live<V = GuestView> {
 }
 
 /**
- * The big screen's one sign-in: trades the `#screen=<token>` from its link for the HttpOnly `kph_<code>` cookie
- * (pa1 `host/signin`). Today's body is `{key}`; pa1b's one-time screen links take `{token}` ("Pocket API v1.1: links"),
- * and switching is this one line.
+ * The big screen's one sign-in: trades the one-time `#screen=<token>` from its link (minted by the card's
+ * `POST /api/pockets/:code/link {role:"screen"}`) for the HttpOnly `kph_<code>` cookie. pa1b's `host/signin` spends a
+ * link only for `{token}`; `{key}` is the host key, so a screen token sent as `{key}` was refused 401 not_host
+ * (quiz-tv-screen-link). Every TV (quiz, queue, wall) signs in through here.
  */
-export const screenSignIn = <V>(api: Api<V>, token: string): Promise<Reply<V>> => api.call('host/signin', { key: token });
+export const screenSignIn = <V>(api: Api<V>, token: string): Promise<Reply<V>> => api.call('host/signin', { token });

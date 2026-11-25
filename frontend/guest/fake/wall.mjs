@@ -151,6 +151,8 @@ export class WallBox {
     if (this.tv) {
       if (what === 'host/signin') {
         if (method !== 'POST') return err(405, 'method');
+        // Like pa1b's host/signin: a screen link is spent only for {token}; {key} is the host key's field.
+        if (!body.token) return err(401, body.key ? 'not_host' : 'no_key');
         if (this.ended()) return err(410, 'ended');
         return { status: 200, body: this.env(), cookie: true };
       }

@@ -70,7 +70,9 @@ export class ScreenBox {
     if (what === 'host/signin') {
       this.signins.push(body);
       if (method !== 'POST') return err(405, 'method');
-      const token = body.key ?? body.token;
+      // Like pa1b's host/signin: a link is spent only for {token}; a {key} that isn't the host key is 401 not_host.
+      const token = body.token;
+      if (!token && body.key) return err(401, 'not_host', "That host link doesn't work any more.");
       if (this.scene === 'expired' || !token || token === 'used') return err(401, 'link_used_or_expired', 'This link was already used or is too old. Open a new one from the card.');
       return { status: 200, body: this.env(), cookie: true };
     }

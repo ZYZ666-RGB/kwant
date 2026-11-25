@@ -319,6 +319,43 @@ async fn a_token_works_once_and_not_after_ten_minutes() {
     }
 }
 
+/// The field the big screen page puts its `#screen=` token in, read from `screenSignIn` in
+/// frontend/guest/src/api.ts (the one sign-in every TV uses: quiz, queue and wall).
+fn tv_signin_field() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/guest/src/api.ts");
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let line = src.lines().find(|l| l.contains("export const screenSignIn")).expect("screenSignIn in frontend/guest/src/api.ts");
+    let body = line.split("'host/signin',").nth(1).unwrap_or_else(|| panic!("screenSignIn posts to host/signin: {line}"));
+    let field: String = body.trim_start().trim_start_matches('{').trim_start().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    assert!(!field.is_empty(), "screenSignIn's body: {line}");
+    field
+}
+
+/// quiz-tv-screen-link: the card's Big screen link (`/p/<code>#screen=<token>`, a token from
+/// `/link {role:"screen"}`), sent the way the TV page sends it, signs in once as the big screen;
+/// the same link a second time is refused with "open a new one from the card". On main the page
+/// sent `{key}`, which `host_signin` reads as the host key: 401 not_host, and every TV was refused.
+#[tokio::test]
+async fn the_card_big_screen_link_signs_the_tv_in_once() {
+    let t = setup().await;
+    let (code, _) = make(&t).await;
+    let field = tv_signin_field();
+    let tok = token(&t, &code, "screen").await;
+    let r = signin(&t, &code, json!({ field.as_str(): tok })).await;
+    assert_eq!(r.status, StatusCode::OK, "the TV page sends {{{field}: <screen token>}}: {}", r.body);
+    assert_eq!(r.body["viewer"], "screen");
+    let session = r.cookie(&guest::host_cookie(&code)).expect("the sign-in sets the host cookie");
+    assert_eq!(host_state(&t, &code, &session, Some("screen")).await.status, StatusCode::OK, "the TV reads the big screen");
+    assert_eq!(host_action(&t, &code, &session, "advance").await.error(), (StatusCode::FORBIDDEN, Some("screen_only")), "and only watches");
+    let again = signin(&t, &code, json!({ field.as_str(): tok })).await;
+    assert_eq!(again.error(), (StatusCode::UNAUTHORIZED, Some("link_used_or_expired")));
+    assert_eq!(again.body["message"], "This link was already used or is too old. Open a new one from the card.");
+    // A screen token in the host key's field is nobody, and it leaves the link unspent
+    let tok = token(&t, &code, "screen").await;
+    assert_eq!(signin(&t, &code, json!({ "key": tok })).await.error(), (StatusCode::UNAUTHORIZED, Some("not_host")));
+    assert_eq!(signin(&t, &code, json!({ "token": tok })).await.status, StatusCode::OK);
+}
+
 fn keys_like() -> String {
     kwnt::pocket::keys::new_key()
 }
