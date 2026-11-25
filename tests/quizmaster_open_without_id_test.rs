@@ -226,16 +226,25 @@ fn content(m: &Value) -> String {
 
 const READY_REPLY: &str = "Your Friday Pub Quiz is Ready: every answer checked, dry run passed. Say \"open it\" when guests should join.";
 
-/// The offered tool whose name ends in `tool` (kwant may prefix it with its gateway's name).
-fn offered(body: &Value, tool: &str) -> String {
-    body["tools"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|t| t["function"]["name"].as_str())
-        .find(|n| *n == tool || n.ends_with(&format!("__{tool}")))
+/// Calls the offered tool whose name ends in `tool` (kwant prefixes it with its gateway's name),
+/// the way a real model must: by name when the turn lists it in full, else through
+/// `kwnt_call_tool`. A turn with many tools lists only kwant's core ones in full and names the
+/// rest, Quizmaster's pocket tools among them, in `kwnt_find_tools`' description.
+fn use_tool(body: &Value, tool: &str, args: Value) -> Value {
+    let tools: Vec<&Value> = body["tools"].as_array().into_iter().flatten().map(|t| &t["function"]).collect();
+    let ours = |n: &str| n == tool || n.ends_with(&format!("__{tool}"));
+    if let Some(name) = tools.iter().filter_map(|f| f["name"].as_str()).find(|n| ours(n)) {
+        return call_tool(name, args);
+    }
+    let named = tools
+        .iter()
+        .find(|f| f["name"] == "kwnt_find_tools")
+        .and_then(|f| f["description"].as_str())
+        .and_then(|d| d.split("Not listed in full: ").nth(1))
+        .and_then(|list| list.trim_end_matches('.').split(", ").map(str::trim).find(|n| ours(n)))
         .unwrap_or_else(|| panic!("{tool} isn't offered: {}", body["tools"]))
-        .to_string()
+        .to_string();
+    call_tool("kwnt_call_tool", json!({"name": named, "arguments": args}))
 }
 
 /// What the scripted host's model does. Turn 1 ("make us a pub quiz"): the template, then the
@@ -248,7 +257,7 @@ fn script(body: &Value, pages: &str) -> Value {
     if last["role"] == "tool" {
         let result = content(&last);
         if result.contains("Template (") {
-            return call_tool(&offered(body, "pocket_create"), json!({"spec": write_friday_quiz(&result, pages)}));
+            return use_tool(body, "pocket_create", json!({"spec": write_friday_quiz(&result, pages)}));
         }
         if asked.contains("open it") {
             return say(&format!("Done. {}", result.lines().next().unwrap_or("")));
@@ -256,10 +265,10 @@ fn script(body: &Value, pages: &str) -> Value {
         return say(READY_REPLY);
     }
     if asked.contains("open it") {
-        return call_tool(&offered(body, "pocket_open"), json!({}));
+        return use_tool(body, "pocket_open", json!({}));
     }
     if asked.contains("make us a pub quiz") {
-        return call_tool(&offered(body, "pocket_create"), json!({}));
+        return use_tool(body, "pocket_create", json!({}));
     }
     say("ok")
 }
