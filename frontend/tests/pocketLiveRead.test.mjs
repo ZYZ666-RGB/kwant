@@ -177,7 +177,11 @@ test('127.0.0.1 box: live opens on From anywhere with one "Make a link for phone
   assert.equal(make.length, 1, 'one button');
   assert.equal(make[0].textContent.trim(), 'Make a link for phones');
   assert.match(make[0].className, /kw-btn-primary/);
-  assert.match(v.host.querySelector('[data-join="compact"]').textContent, /From anywhere/);
+  // Mira D2: one violet button; Open the remote waits as a ghost until the link exists.
+  assert.match(button(v, 'Open the remote').className, /kw-btn-ghost/);
+  assert.doesNotMatch(button(v, 'Open the remote').className, /kw-btn-primary/);
+  // Mira D4: nothing to scan yet, so no "late arrivals" promise.
+  assert.equal(v.host.querySelector('[data-join="compact"] p').textContent.trim(), 'From anywhere');
   assert.equal(v.host.querySelector('[data-no-link]'), null, 'no "not set up yet" line');
   assert.equal(v.host.querySelector('[data-qr]'), null);
   await click(make[0]);
@@ -192,9 +196,42 @@ test('127.0.0.1 box: live opens on From anywhere with one "Make a link for phone
   assert.equal(v.host.querySelector('input[aria-label="Join link"]').value, QUICK);
   assert.ok(v.host.querySelector('[data-qr]'));
   assert.equal(v.host.querySelector('[data-phone-link]'), null);
+  assert.match(button(v, 'Open the remote').className, /kw-btn-primary/, 'primary again once the link is on');
+  assert.match(v.host.querySelector('[data-join="compact"] p').textContent, /From anywhere · late arrivals can still scan in/);
 });
 
-test('127.0.0.1 box, ready: the join box opens on From anywhere; Same Wi-Fi says the box only takes guests from itself', async () => {
+test('Mira D5: the starting line promises the QR code and link, not "the code"', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  box(() => read('open', local({ state: 'starting', url: null, note: null })));
+  const v = await card('live');
+  assert.equal(v.host.querySelector('[data-phone-link="starting"]').textContent.trim(), "Making a link for phones. This takes up to a minute; the QR code and link show here when it's ready.");
+});
+
+test('Mira D2: Open the remote before the phone link says to make the link first', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const calls = box(() => read('open', local()));
+  const v = await card('live');
+  await click(button(v, 'Open the remote'));
+  assert.match(v.host.querySelector('[data-link-panel]').textContent, /Make a link for phones first\. The remote and the big screen use it too\./);
+  assert.equal(calls.filter(([meth, url]) => meth === 'POST' && url.endsWith('/link')).length, 0, 'no token minted');
+});
+
+test('Mira D3: End turns the chip Ended at once, not at the next read, and stops reading', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const calls = box((meth, url) => (meth === 'POST' && url.endsWith('/end') ? { pocket: { code: 'fq7k2m' } } : read('open', join())));
+  const v = await card('live');
+  await click(button(v, 'End quiz'));
+  await click(button(v, 'End and show winners'));
+  assert.equal(chip(v), 'ended');
+  assert.match(v.host.textContent, /Ended \d{1,2}:\d{2} [AP]M/);
+  assert.ok(v.host.querySelector('[data-done="ok"]'), 'the done line stays');
+  for (const t of ['End quiz', 'Open the remote', 'Big screen']) assert.equal(button(v, t), undefined, `${t} is gone`);
+  const n = reads(calls);
+  await tick(m.POLL_MS * 2);
+  assert.equal(reads(calls), n, 'no reads after End');
+});
+
+test('127.0.0.1 box, ready: the join box opens on From anywhere; Same Wi-Fi shows one plain line (Mira D1)', async () => {
   mock.timers.enable({ apis: ['setTimeout'] });
   box(() => read('open', local()));
   const v = await card('ready');
@@ -203,6 +240,10 @@ test('127.0.0.1 box, ready: the join box opens on From anywhere; Same Wi-Fi says
   assert.equal(v.host.querySelectorAll('[data-action="phone-link"]').length, 1);
   await click(radios[0]);
   assert.equal(v.host.querySelector('[data-no-link]').textContent.trim(), m.ONLY_THIS_COMPUTER_LINE);
+  assert.equal(m.ONLY_THIS_COMPUTER_LINE, "Phones can't reach this box on Wi-Fi: it only answers this computer. Pick From anywhere to make a link for phones.");
+  const box_ = v.host.querySelector('[data-join="full"]');
+  assert.doesNotMatch(box_.textContent, /scan the code and play|At a pub/, 'no Wi-Fi promise or limit line');
+  assert.equal(box_.textContent.match(/Pick From anywhere/g).length, 1, 'asked once');
   assert.equal(v.host.querySelector('[data-action="phone-link"]'), null);
   // The person's pick sticks through the next read.
   await tick(m.POLL_MS);

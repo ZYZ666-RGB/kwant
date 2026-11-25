@@ -37,7 +37,7 @@ import type { PocketBlock, PocketJoinInfo, PocketJoinMode, PocketMiss, PocketRes
 import { MAX_TEXT, inRange, isHttpUrl, isIndex, isNum, isObj, isText, optText, parseCommon } from '../../smartResults';
 import { Sticker } from '../Sticker';
 import { QrImage } from '../DeviceSignIn';
-import { BTN, Bar, Callout, GHOST, HALF, ICON, LATER_CLS, LaterButton, LinkField, NoLinkYet, PRIMARY, Qr, Row, STOP, THIS_COMPUTER_ONLY, WARN_FILL } from './pocketParts';
+import { BTN, Bar, Callout, GHOST, HALF, ICON, LATER_CLS, LaterButton, LinkField, NoLinkYet, ONLY_THIS_COMPUTER_LINE, PRIMARY, Qr, Row, STOP, THIS_COMPUTER_ONLY, WARN_FILL } from './pocketParts';
 import { TEAM_PALETTES, isPalette, paletteCreature, renderCreature } from '../ModernAvatar';
 import { linkUrl, pocketApi, PocketApiError, validPocketCode } from '../../pocketApi';
 import { useMedia } from '../../useMedia';
@@ -492,7 +492,7 @@ const PhoneLink: React.FC<{ join: PocketJoinInfo; ctl: PhoneLinkCtl }> = ({ join
     return (
       <p role="status" className="flex items-start gap-2 text-[15px] leading-[22px] text-zinc-200 sm:text-[13px] sm:leading-5" data-phone-link="starting">
         <Loader2 size={15} className={`${ICON} text-sky-300 motion-safe:animate-spin`} aria-hidden="true" />
-        <span>Making a link for phones. It takes up to a minute; the code shows here as soon as it's ready.</span>
+        <span>Making a link for phones. This takes up to a minute; the QR code and link show here when it's ready.</span>
       </p>
     );
   }
@@ -521,6 +521,7 @@ const NoUrl: React.FC<{ join: PocketBlock['join']; mode: PocketJoinMode; phoneLi
 const JoinBox: React.FC<{ block: PocketBlock; mode: PocketJoinMode; setMode: (m: PocketJoinMode) => void; phoneLink?: PhoneLinkCtl }> = ({ block, mode, setMode, phoneLink }) => {
   const join = block.join;
   const url = join ? urlFor(join, mode) : null;
+  const onlyHere = mode === 'wifi' && !url && join?.wifi_note === THIS_COMPUTER_ONLY;
   const radios = useRef<Array<HTMLButtonElement | null>>([]);
   const labelId = useId();
   const modes: PocketJoinMode[] = ['wifi', 'anywhere'];
@@ -566,14 +567,23 @@ const JoinBox: React.FC<{ block: PocketBlock; mode: PocketJoinMode; setMode: (m:
             );
           })}
         </div>
-        <p className="text-[15px] leading-[22px] text-zinc-100 sm:text-body">{copy.text[mode].body}</p>
-        {noQuick(join, mode) ? <StableOnly /> : <p className="text-[13px] leading-5 text-zinc-400 sm:text-meta">{copy.text[mode].limit}</p>}
-        {copy.hint && (
-          <p className="text-[13px] leading-5 text-zinc-400 sm:text-meta" data-join-hint>
-            {copy.hint}
+        {onlyHere ? (
+          // A 127.0.0.1 box on the Wi-Fi tab: one plain line instead of a Wi-Fi promise it can't keep (Mira D1).
+          <p className="text-[15px] leading-[22px] text-zinc-100 sm:text-body" data-no-link="this-computer-only">
+            {ONLY_THIS_COMPUTER_LINE}
           </p>
+        ) : (
+          <>
+            <p className="text-[15px] leading-[22px] text-zinc-100 sm:text-body">{copy.text[mode].body}</p>
+            {noQuick(join, mode) ? <StableOnly /> : <p className="text-[13px] leading-5 text-zinc-400 sm:text-meta">{copy.text[mode].limit}</p>}
+            {copy.hint && (
+              <p className="text-[13px] leading-5 text-zinc-400 sm:text-meta" data-join-hint>
+                {copy.hint}
+              </p>
+            )}
+            {url ? <LinkField url={url} /> : <NoUrl join={join} mode={mode} phoneLink={phoneLink} />}
+          </>
         )}
-        {url ? <LinkField url={url} /> : <NoUrl join={join} mode={mode} phoneLink={phoneLink} />}
       </div>
     </div>
   );
@@ -592,7 +602,8 @@ const CompactJoin: React.FC<{ block: PocketBlock; phoneLink?: PhoneLinkCtl }> = 
       <div className="flex min-w-0 flex-1 flex-col gap-2">
         <p className="flex items-center gap-1.5 text-[13px] text-zinc-300 sm:text-meta">
           <Icon size={14} className="shrink-0 text-sky-300" aria-hidden="true" />
-          {JOIN_TEXT[shownMode].label} · late arrivals can still scan in
+          {JOIN_TEXT[shownMode].label}
+          {url ? ' · late arrivals can still scan in' : ''}
         </p>
         {url ? <LinkField url={url} /> : noQuick(join, shownMode) ? <StableOnly /> : <NoUrl join={join} mode={shownMode} phoneLink={phoneLink} />}
       </div>
@@ -1014,7 +1025,7 @@ const Actions: React.FC<{
     case 'live':
       return (
         <div className={grid}>
-          <button type="button" onClick={() => onLink('host')} aria-expanded={shown === 'host'} aria-controls={panelId} className={`${PRIMARY} ${full}`} data-action="remote">
+          <button type="button" onClick={() => onLink('host')} aria-expanded={shown === 'host'} aria-controls={panelId} className={`${needsPhoneLink(block.join) ? GHOST : PRIMARY} ${full}`} data-action="remote">
             <Smartphone size={14} aria-hidden="true" />
             Open the remote
           </button>
@@ -1338,6 +1349,8 @@ const QuizPocket: React.FC<RendererProps<PocketBlock>> = ({ block: chatBlock, as
     setBusy(true);
     try {
       await pocketApi.end(block.code);
+      // The chip turns Ended with the line, not at the next read (Mira D3).
+      if (kind === 'end') setBox({ code: block.code, state: 'ended', endedAt: new Date().toISOString(), join: null });
       setDone({ kind: 'ok', text: kind === 'end' ? 'Ended. Quizmaster is posting the winners in this chat.' : `Stopped. Nobody can join ${block.name} now.` });
       setConfirm(null);
     } catch (e) {
@@ -1355,6 +1368,7 @@ const QuizPocket: React.FC<RendererProps<PocketBlock>> = ({ block: chatBlock, as
       // keep the card's copy
     }
     const base = join ? urlFor(join, mode) ?? urlFor(join, mode === 'wifi' ? 'anywhere' : 'wifi') : null;
+    if (!base && needsPhoneLink(join)) throw new PocketApiError('Make a link for phones first. The remote and the big screen use it too.', 0, 'no_address');
     if (!base) throw new PocketApiError("Your box hasn't said its address yet. Try again in a moment.", 0, 'no_address');
     const minted = await pocketApi.mintLink(block.code, role);
     const at = Date.parse(minted.expires_at);
