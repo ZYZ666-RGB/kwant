@@ -184,6 +184,10 @@ async fn belongs(conn: &mut SqliteConnection, row: &QuizDraftRow, input: &NewMes
 /// without them. `test` exists only in debug builds.
 const RESULT_KITS: &[&str] = &[crate::kits::quiz::KIT_ID, "test"];
 
+/// The most player names a results card's team shows (the chat's `validTeam` and
+/// [`super::validate`] refuse more).
+const MAX_CARD_MEMBERS: usize = 12;
+
 /// The results card of a message kwnt posted when a pocket ended (`meta.kind` "pocket",
 /// `reason` "results", `src/pocket/schedule.rs` `post_results`), read from the `meta.block` it
 /// built from the pocket's own data (quiz-card-and-results, Mira's ux-pass-0952 fix #2). `None`
@@ -231,8 +235,12 @@ pub fn from_meta(extra: &MessageExtra) -> Option<Block> {
             if let Some(n) = team.get_mut("name") {
                 clean(n, 40);
             }
-            for m in team.get_mut("members").and_then(Value::as_array_mut).into_iter().flatten() {
-                clean(m, 24);
+            // The kit lists every player of a team; the card names at most 12 (`players` keeps the
+            // real count), and a name that cleans to nothing is left out rather than refusing the card
+            if let Some(members) = team.get_mut("members").and_then(Value::as_array_mut) {
+                members.iter_mut().for_each(|m| clean(m, 24));
+                members.retain(|m| m.as_str().is_none_or(|t| !t.trim().is_empty()));
+                members.truncate(MAX_CARD_MEMBERS);
             }
         }
     }
@@ -636,6 +644,23 @@ mod tests {
         assert!(r["teams"][0]["members"].as_array().unwrap().iter().all(|m| !m.as_str().unwrap().contains('<') && utf16_len(m.as_str().unwrap()) <= 24));
         assert!(!p.ended.as_ref().unwrap()["winner"]["name"].as_str().unwrap().contains('<'));
         assert!(utf16_len(&p.name) <= 80);
+        assert_eq!(check(*p), Ok(()));
+    }
+
+    /// Rigel's QA F1: a team of 13+ players (a class quiz, a big pub team) still gets its card. The
+    /// card names the first 12 and keeps the real count; a name that cleans to nothing is left out.
+    #[test]
+    fn a_big_team_still_gets_its_results_card() {
+        let mut meta = ended_meta("PQ7XK2", "quiz");
+        let mut names: Vec<String> = (1..=13).map(|i| format!("Kid {i}")).collect();
+        names.insert(1, " \u{7} ".into());
+        meta["block"]["results"]["teams"][0]["members"] = serde_json::json!(names);
+        meta["block"]["results"]["teams"][0]["players"] = serde_json::json!(13);
+        let Some(Block::Pocket(p)) = results_of(meta) else { panic!("no card") };
+        let team = &p.results.as_ref().unwrap()["teams"][0];
+        let members: Vec<&str> = team["members"].as_array().unwrap().iter().map(|m| m.as_str().unwrap()).collect();
+        assert_eq!(members, (1..=12).map(|i| format!("Kid {i}")).collect::<Vec<_>>());
+        assert_eq!(team["players"], serde_json::json!(13));
         assert_eq!(check(*p), Ok(()));
     }
 
