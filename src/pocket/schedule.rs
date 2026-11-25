@@ -452,6 +452,14 @@ async fn forget_names(state: &AppState, now: DateTime<Utc>) -> usize {
                     tracing::warn!("pocket apps: couldn't clear names from a results message: {e}");
                     continue;
                 }
+                // The chat's results card is a stored copy of the block: it loses the names too
+                m.results = match state.db.refresh_pocket_results(&id, &meta).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("pocket apps: couldn't clear names from a results card: {e}");
+                        continue;
+                    }
+                };
                 m.meta = Some(meta.to_string());
                 let _ = state.event_sender.send(RuntimeEvent::MessageAdded { message: serde_json::to_value(&m).unwrap_or(Value::Null) });
                 done += 1;
