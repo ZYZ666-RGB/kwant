@@ -214,6 +214,18 @@ pub fn from_meta(extra: &MessageExtra) -> Option<Block> {
     if let Some(w) = p.ended.as_mut().and_then(|e| e.get_mut("winner")).and_then(|w| w.get_mut("name")) {
         clean(w, 40);
     }
+    // Results posted before the card learned its times kept raw timestamps; the card prints these as they
+    // are, so they read as the card's words do, in UTC (the message doesn't keep the person's zone)
+    if let Some(e) = p.ended.as_mut().and_then(Value::as_object_mut) {
+        let raw = |k: &str| e.get(k).and_then(Value::as_str).and_then(|t| DateTime::parse_from_rfc3339(t.trim()).ok()).map(|t| t.naive_utc());
+        let (at, deletes) = (raw("at"), raw("deletes_on"));
+        if let Some(t) = at {
+            e.insert("at".into(), Value::String(format!("{} UTC", crate::pocket::schedule::clock(t))));
+        }
+        if let Some(t) = deletes {
+            e.insert("deletes_on".into(), Value::String(t.format("%a, %b %-d (UTC)").to_string()));
+        }
+    }
     if let Some(teams) = p.results.as_mut().and_then(|r| r.get_mut("teams")).and_then(Value::as_array_mut) {
         for team in teams.iter_mut() {
             if let Some(n) = team.get_mut("name") {
@@ -541,7 +553,7 @@ mod tests {
                 "code": code, "kit": kit, "name": "Friday Pub Quiz", "when": null, "state": "ended",
                 "progress": null, "rounds": [], "checks": null, "dry_run": null, "eta": null, "opens_line": null,
                 "live": null, "join": null,
-                "ended": {"at": "2026-11-25T20:41:07.123456789Z", "winner": {"name": "Quizzly Bears", "points": 31}, "stats": null, "deletes_on": "2026-12-25T20:41:07Z"},
+                "ended": {"at": "9:41 PM", "winner": {"name": "Quizzly Bears", "points": 31}, "stats": null, "deletes_on": "Fri, Dec 25"},
                 "budget": null,
                 "results": {
                     "teams": [
@@ -592,6 +604,21 @@ mod tests {
         junk["block"] = serde_json::json!("not a block");
         assert!(results_of(junk).is_none());
         assert!(results_of(serde_json::json!(null)).is_none());
+    }
+
+    /// A results message stored before the card learned its times still reads in words.
+    #[test]
+    fn raw_end_times_from_older_results_read_as_words() {
+        let mut meta = ended_meta("PQ7XK2", "quiz");
+        meta["block"]["ended"]["at"] = serde_json::json!("2026-11-27T21:12:40.123456789Z");
+        meta["block"]["ended"]["deletes_on"] = serde_json::json!("2026-12-04T21:12:40+00:00");
+        let Some(Block::Pocket(p)) = results_of(meta) else { panic!("no card") };
+        let e = p.ended.as_ref().unwrap();
+        assert_eq!((e["at"].as_str(), e["deletes_on"].as_str()), (Some("9:12 PM UTC"), Some("Fri, Dec 4 (UTC)")));
+        assert_eq!(check(*p), Ok(()));
+        // Words are kept as they are
+        let Some(Block::Pocket(p)) = results_of(ended_meta("PQ7XK2", "quiz")) else { panic!("no card") };
+        assert_eq!((p.ended.as_ref().unwrap()["at"].as_str(), p.ended.as_ref().unwrap()["deletes_on"].as_str()), (Some("9:41 PM"), Some("Fri, Dec 25")));
     }
 
     /// Guest-typed team and player names are cleaned and bounded, so the card still passes.
