@@ -1040,6 +1040,8 @@ test("quiz on the engine's own views: round and question, a counting timer, {q, 
     await flush();
     assert.ok(s.text().includes('Round 2 · Numbers'), s.text());
     assert.ok(s.text().includes('Question 3 of 3'), s.text());
+    assert.ok(s.text().includes('Send the number. Your first answer counts.'), s.text());
+    assert.ok(!s.text().includes('bonus'), 'no made-up bonus rule');
     const send = [...s.root.querySelectorAll('button')].find((x) => /^Send/.test(x.textContent.trim()));
     click(send);
     await flush();
@@ -1061,6 +1063,11 @@ test("quiz on the engine's own views: round and question, a counting timer, {q, 
     assert.ok(s.text().includes('Quizzly Bears') && s.text().includes('Fact Hunters'));
     assert.ok(!/undefined|NaN/.test(s.text()), s.text());
     assert.ok(s.calls.some((c) => c.what === 'info'), 'asks info for the team colours');
+    assert.ok(s.text().includes('Next round soon'), s.text());
+    // The colours come from info even when state has nothing new (204): Quizzly Bears 0, Fact Hunters 1, as on the TV.
+    const sw = [...s.root.querySelectorAll('[data-screen] .sw')].map((e) => e.className);
+    assert.equal(sw.length, 2);
+    assert.deepEqual(sw, ['sw t0', 'sw t1'], `team swatches differ: ${sw.join(' | ')}`);
     s.app.stop();
   }
   {

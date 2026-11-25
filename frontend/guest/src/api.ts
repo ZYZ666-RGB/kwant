@@ -105,9 +105,12 @@ export function quizPhone(kv: Obj, memo: QuizMemo = {}): { view: Partial<GuestVi
         secs_left: engine === 'question' && time ? Math.ceil((num(time.remaining_ms) ?? 0) / 1000) : 0,
         total_secs: num(q.time_limit_s) ?? 0,
         answer,
+        // The page's own number line promises a closest-wins bonus the engine doesn't have: a number counts when it's right.
+        hint: kind === 'number' ? 'Send the number. Your first answer counts.' : undefined,
       }
     : undefined;
   if (question && !question.answer) delete question.answer;
+  if (question && !question.hint) delete question.hint;
   const rv = obj(kv.reveal);
   let reveal: GuestView['reveal'];
   if (engine === 'reveal' && rv && question) {
@@ -224,6 +227,8 @@ export class Api<V = GuestView> {
   memo: QuizMemo = {};
   /** The last quiz state named a team whose colour isn't known yet: ask `info` again. */
   missing = false;
+  /** The last state's JSON, so it can be read again once `info` brings the colours (state?since= answers 204 then). */
+  private last: unknown;
   /** Where the view comes from: the guest's own `state` and `ws`, or the big screen's `host/state?view=screen` and `ws?view=screen`. */
   statePath = 'state';
   wsPath = 'ws';
@@ -264,8 +269,16 @@ export class Api<V = GuestView> {
     if (s?.version !== undefined) this.version = s.version;
     const v = s?.view as (GuestView & { team_max?: number; rounds?: number }) | undefined;
     if (Array.isArray(v?.teams)) this.memo = { teams: v.teams, team_max: v.team_max, rounds: v.rounds };
-    else if (s) this.missing = s.missing === true;
+    else if (s) {
+      this.missing = s.missing === true;
+      this.last = json;
+    }
     return s?.view;
+  }
+
+  /** The last state read again, with what `memo` knows now (the team colours from a later `info`). */
+  retake(): V | undefined {
+    return this.last === undefined ? undefined : this.parse(this.last, this.memo)?.view;
   }
 
   /** Full state, or with `changed` only what is newer than the last version (204 gives no view). */

@@ -157,7 +157,7 @@ export class GuestApp {
   private colourAsk = 0;
   /**
    * A quiz state named a team whose colour isn't known (a team made after this phone read `info`, or a seat restored
-   * without the join screen): read the public `info` once for the colours, then the state again. At most every 10 s.
+   * without the join screen): read the public `info` once for the colours, then the last state again with them. At most every 10 s.
    */
   private askColours(): void {
     if (!this.api.missing || this.gone || this.env.now() - this.colourAsk < 10_000) return;
@@ -165,8 +165,12 @@ export class GuestApp {
     void (async () => {
       const i = await this.api.info();
       if (!i.ok || this.gone) return;
-      const r = await this.api.state();
-      if (r.ok && r.view && !this.gone) this.show(r.view);
+      // Not state?since=: with nothing new the box answers 204. The state already read is read again with the colours.
+      const v = this.api.retake();
+      if (!v || this.gone) return;
+      // A patch keeps the rows it drew; the colours are in the rows, so draw them again.
+      this.key = '';
+      this.show(v);
     })();
   }
 
@@ -1095,7 +1099,7 @@ export class GuestApp {
     return h(
       'div',
       { class: 'body' },
-      h('div', { class: 'qmeta' }, h('span', null, `After round ${b.after_round} of ${b.rounds}`), h('span', { 'data-next': '' }, b.next_in_secs != null ? '' : 'Next round soon')),
+      h('div', { class: 'qmeta' }, h('span', null, `After round ${b.after_round} of ${b.rounds}`), h('span', { 'data-next': '' }, b.next_in_secs != null ? '' : b.rounds && b.after_round >= b.rounds ? 'Final scores next' : 'Next round soon')),
       b.line ? h('div', { class: 'say' }, quizmaster(48, 'finished'), h('div', { class: 'b lg' }, b.line)) : null,
       lb,
       line ? h('p', { class: 'small center' }, line) : null,
