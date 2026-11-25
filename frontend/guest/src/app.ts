@@ -854,50 +854,57 @@ export class GuestApp {
 
   private numberAnswer(q: Question, sent: Answer | undefined): Node[] {
     const n = q.number ?? {};
-    if (this.numDraft === null || this.key !== this.keyOf(this.view!)) this.numDraft = n.start ?? 0;
-    let val = sent && 'number' in sent ? sent.number : this.numDraft!;
+    // With no start from the engine the field opens empty: one stray tap must not lock in a guessed 0.
+    if (this.numDraft === null || this.key !== this.keyOf(this.view!)) this.numDraft = n.start ?? null;
+    let val: number | null = sent && 'number' in sent ? sent.number : this.numDraft;
     const input = h('input', {
       class: 'input num tab',
       type: 'text',
       inputmode: 'numeric',
+      enterkeyhint: 'send',
       pattern: '-?[0-9]*',
+      placeholder: 'Your number',
       'aria-labelledby': 'qtext',
       'data-answer': '',
       disabled: !!sent,
     }) as HTMLInputElement;
-    input.value = String(val);
-    const send = h('button', { type: 'submit', class: 'gbtn', 'data-answer': '', 'data-send': '', disabled: !!sent }, sent ? this.sendLabel(q.id) : `Send ${fmt(val)}`);
+    input.value = val == null ? '' : String(val);
+    const send = h('button', { type: 'submit', class: 'gbtn', 'data-answer': '', 'data-send': '', disabled: !!sent || val == null }) as HTMLButtonElement;
+    const label = () => {
+      send.textContent = val == null ? 'Send answer' : `Send ${fmt(val)}`;
+      send.disabled = val == null || this.secsLeft(q) <= 0;
+    };
+    if (sent) send.textContent = this.sendLabel(q.id);
+    else label();
     const set = (x: number) => {
       if (n.min != null) x = Math.max(n.min, x);
       if (n.max != null) x = Math.min(n.max, x);
       val = x;
       this.numDraft = x;
       input.value = String(x);
-      send.textContent = `Send ${fmt(x)}`;
+      label();
     };
     input.addEventListener('input', () => {
-      const x = parseInt(input.value.replace(/[^0-9-]/g, ''), 10);
-      if (!Number.isNaN(x)) {
-        val = x;
-        this.numDraft = x;
-        send.textContent = `Send ${fmt(x)}`;
-      }
+      const raw = input.value.trim();
+      val = /^-?[0-9]+$/.test(raw) ? parseInt(raw, 10) : null;
+      this.numDraft = val;
+      label();
     });
     const minus = h('button', { type: 'button', class: 'gbtn ghost step', 'aria-label': 'Minus 1', 'data-answer': '', disabled: !!sent }, '−');
     const plus = h('button', { type: 'button', class: 'gbtn ghost step', 'aria-label': 'Plus 1', 'data-answer': '', disabled: !!sent }, '+');
-    minus.addEventListener('click', () => set(val - 1));
-    plus.addEventListener('click', () => set(val + 1));
+    minus.addEventListener('click', () => set(val == null ? -1 : val - 1));
+    plus.addEventListener('click', () => set(val == null ? 1 : val + 1));
     const form = h(
       'form',
       { class: 'stack' },
       h('div', { class: 'numrow' }, minus, input, plus),
-      h('p', { class: 'small center' }, q.hint || 'Closest answer wins. Exact gets a 50 point bonus.'),
+      h('p', { class: 'small center' }, q.hint || 'Send the number. Your first answer counts.'),
       send,
       h('p', { class: 'small center', 'data-note': '', role: 'status' }, sent ? this.failNote(q.id) : ''),
     );
     form.addEventListener('submit', (e) => {
       e.preventDefault();
-      if (this.sent.has(q.id) || this.secsLeft(q) <= 0) return;
+      if (val == null || this.sent.has(q.id) || this.secsLeft(q) <= 0) return;
       const a = { number: val };
       this.sent.set(q.id, a);
       form.querySelectorAll<HTMLButtonElement | HTMLInputElement>('[data-answer]').forEach((b) => (b.disabled = true));
@@ -1025,11 +1032,11 @@ export class GuestApp {
         h('div', { class: 'pts' }, sign(r.points)),
       );
     } else if (r.outcome === 'judging') {
+      // Pending is waiting, not earned: neutral panel and no icon (the guest kit's `info` glyph draws a padlock, which reads as Locked in).
       panel = h(
         'div',
-        { class: 'panel big-result near' },
-        h('div', { class: 'ic sky' }, icon('star', 'pi big')),
-        h('div', { class: 'word' }, 'Close one'),
+        { class: 'panel big-result' },
+        h('div', { class: 'word mid' }, 'Close one'),
         h('p', { class: 'soft said' }, 'You wrote ', h('b', null, `"${r.yours ?? ''}"`), '. Quizmaster is checking whether it counts.'),
       );
     } else if (r.outcome === 'overturned') {

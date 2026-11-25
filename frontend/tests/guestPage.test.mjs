@@ -123,7 +123,7 @@ const expect = {
   ended: ['ended', ['This quiz has ended', 'Quizzly Bears won with 3,420 points. Thanks for playing!', 'Your name and answers are deleted on Fri, Dec 4.']],
   choice: ['question', ['1994', '1996', '1998', '2000', 'Tap one. Your first tap counts.']],
   text: ['question', ['What is the capital city of Australia?', "Spelling doesn't have to be perfect. Quizmaster settles close ones.", 'Send answer']],
-  number: ['question', ['How many bones', 'Closest answer wins. Exact gets a 50 point bonus.', 'Send 212']],
+  number: ['question', ['How many bones', 'Send the number. Your first answer counts.', 'Send 212']],
   picture: ['question', ['Which fruit is this, cut in half?', 'Picture: drawn by Quizmaster', 'Kiwi']],
   locked: ['question', ['Locked in', '1996', 'Waiting for 5 more players. Eyes on the TV!']],
   right: ['reveal', ['Right!', '+120', '100 + 20 for speed', '62% got it', 'Source: Wikipedia', 'Quizzly Bears', '1,960', '1,360 pts']],
@@ -1017,6 +1017,15 @@ test("quiz on the engine's own views: round and question, a counting timer, {q, 
     assert.equal(s.screen(), 'reveal', name);
     for (const w of words) assert.ok(s.text().includes(w), `${name}: ${w} in ${s.text()}`);
     assert.ok(!/undefined|NaN/.test(s.text()), `${name}: ${s.text()}`);
+    if (name === 'reveal_judging') {
+      // Pending is waiting, not earned: a neutral panel, no icon, the smaller word, no points.
+      const panel = s.root.querySelector('.big-result');
+      assert.ok(!panel.classList.contains('near') && !panel.classList.contains('ok'), panel.className);
+      assert.equal(panel.querySelector('.ic'), null, 'no coloured star');
+      assert.equal(panel.querySelector('.word').className, 'word mid');
+      assert.equal(panel.querySelector('.word').textContent, 'Close one');
+      assert.equal(panel.querySelector('.pts'), null);
+    }
     s.app.stop();
   }
 
@@ -1042,12 +1051,46 @@ test("quiz on the engine's own views: round and question, a counting timer, {q, 
     assert.ok(s.text().includes('Question 3 of 3'), s.text());
     assert.ok(s.text().includes('Send the number. Your first answer counts.'), s.text());
     assert.ok(!s.text().includes('bonus'), 'no made-up bonus rule');
-    const send = [...s.root.querySelectorAll('button')].find((x) => /^Send/.test(x.textContent.trim()));
-    click(send);
+    // No start from the engine: the field opens empty and nothing can be sent yet.
+    const input = s.root.querySelector('input.num');
+    const send = s.root.querySelector('button[data-send]');
+    assert.equal(input.value, '');
+    assert.equal(input.getAttribute('placeholder'), 'Your number');
+    assert.equal(input.getAttribute('enterkeyhint'), 'send');
+    assert.equal(send.textContent, 'Send answer');
+    assert.ok(send.disabled);
+    submit(s.root.querySelector('form'));
     await flush();
-    assert.equal(b.answers.length, 1);
-    assert.equal(b.answers[0].q, 2);
-    assert.equal(typeof b.answers[0].value, 'number');
+    assert.equal(b.answers.length, 0, 'an empty field sends nothing');
+    type(input, '206');
+    assert.equal(send.textContent, 'Send 206');
+    assert.ok(!send.disabled);
+    type(input, '');
+    assert.equal(send.textContent, 'Send answer');
+    assert.ok(send.disabled, 'clearing disables the button again');
+    type(input, '2.5');
+    assert.ok(send.disabled, 'not a whole number');
+    type(input, '206');
+    submit(s.root.querySelector('form'));
+    await flush();
+    assert.deepEqual(b.answers, [{ q: 2, value: 206 }]);
+    s.app.stop();
+  }
+  {
+    // On an empty field + sets 1 and − sets −1, then they step.
+    const b = new EngineBox('question_number', { code: 't' });
+    const s = harness('question_number', { box: b });
+    await s.app.start(null);
+    await flush();
+    const input = s.root.querySelector('input.num');
+    click(s.root.querySelector('[aria-label="Plus 1"]'));
+    assert.equal(input.value, '1');
+    assert.equal(s.root.querySelector('button[data-send]').textContent, 'Send 1');
+    type(input, '');
+    click(s.root.querySelector('[aria-label="Minus 1"]'));
+    assert.equal(input.value, '-1');
+    click(s.root.querySelector('[aria-label="Minus 1"]'));
+    assert.equal(input.value, '-2');
     s.app.stop();
   }
 
