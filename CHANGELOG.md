@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Changed
+- The Custom API docs now say MCP tools are offered on Anthropic-Messages servers too, not only OpenAI-chat ones (#1219)
+
 ## [Mac 0.9.52] - 2026-11-25
 
 kwant 0.9.52: one working scene instead of a strip and a steps card, plain words for AIs and AI use, plain words on the sign-in, team and update screens, a shorter New routine form, plain words in the folder picker and the thinking note, silent stops show up in Needs you, four short Settings pages and "AI" instead of "engine" on the New bot form.
