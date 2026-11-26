@@ -8,7 +8,7 @@
 //!   and each new address is checked the same way;
 //! - the page must answer within [`Policy::timeout`] and be at most [`Policy::max_bytes`] (the
 //!   body is read in a stream and stopped at the cap), as HTML or plain text. Wikipedia's biggest
-//!   articles are 3-4 MB of HTML, so its hosts get [`WIKIPEDIA_MAX_BYTES`] ([`Policy::big_hosts`]);
+//!   articles are up to ~3.6 MB of HTML, so its hosts get [`WIKIPEDIA_MAX_BYTES`] ([`Policy::big_hosts`]);
 //! - the quote, normalised like guest answers (`matching::normalise`), must be on the page;
 //! - the answer must be in the quote: the text answer or an accepted spelling as whole words, the
 //!   right option's text, or for a number the same number (commas between digits ignored).
@@ -27,7 +27,7 @@ use std::time::Duration;
 pub const USER_AGENT: &str = "kwant-quizmaster/1 (source check)";
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_BYTES: usize = 2 * 1024 * 1024;
-/// The cap for `wikipedia.org` and its subdomains: its most-read articles measured 1.6-3.8 MB of
+/// The cap for `wikipedia.org` and its subdomains: its most-read articles measured 1.6-3.6 MB of
 /// HTML on Nov 26, 2026 (quiz-source-big-pages/impl.md), about twice that leaves room to grow.
 pub const WIKIPEDIA_MAX_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_REDIRECTS: usize = 3;
@@ -640,11 +640,13 @@ mod tests {
         Policy { big_hosts: vec![("localhost".into(), WIKIPEDIA_MAX_BYTES)], ..local() }
     }
 
+    // Checked when the tests compile: the Wikipedia cap is the bigger one.
+    const _: () = assert!(WIKIPEDIA_MAX_BYTES > MAX_BYTES);
+
     #[test]
     fn wikipedia_hosts_get_the_bigger_cap_and_look_alikes_do_not() {
         let p = Policy::default();
         let cap = |u: &str| p.cap_for(&url::Url::parse(u).unwrap());
-        assert!(WIKIPEDIA_MAX_BYTES > MAX_BYTES);
         for u in [
             "https://en.wikipedia.org/wiki/Joe_Biden",
             "https://de.wikipedia.org/wiki/Vereinigte_Staaten",
