@@ -248,6 +248,45 @@ test('a 404 read ends the card cleanly; reads stop', async () => {
   assert.equal(gets(calls), n, 'no reads after it is gone');
 });
 
+test('only the box\'s own not_found ends the card: Pocket apps off or a bare 404 keep the view and keep reading', async () => {
+  for (const answer of [
+    () => json({ error: 'pocket_apps_off', message: 'Pocket apps are off. Turn them on in Settings first.' }, 404),
+    () => new Response('nope', { status: 404 }),
+  ]) {
+    let off = false;
+    const calls = box([() => (off ? answer() : json(read(3)))]);
+    const v = await mount();
+    assert.match(v.host.textContent, /3 of 6 joined/);
+    off = true;
+    await tick();
+    const card = v.host.querySelector('[data-santa]');
+    assert.notEqual(card.dataset.gone, 'true', 'not "deleted"');
+    assert.equal(card.dataset.santa, 'collecting');
+    assert.equal(v.host.querySelector('[data-done="gone"]'), null);
+    assert.match(v.host.textContent, /3 of 6 joined/, 'the last view stays');
+    const n = gets(calls);
+    off = false;
+    await tick();
+    assert.equal(gets(calls), n + 1, 'it keeps reading');
+    for (const x of mounted) x.done();
+    mounted.clear();
+    ticks = [];
+  }
+});
+
+test('gone after an action: the gone line replaces the action line (D1)', async () => {
+  let gone = false;
+  box([() => (gone ? json({ error: 'not_found', message: "There's no pocket here." }, 404) : json(read(4)))], () => json(read(4, 'drawn')));
+  const v = await mount();
+  await click(button(v, 'Draw now'));
+  await click(button(v, 'Draw names'));
+  assert.ok(v.host.querySelector('[data-done="ok"]'), 'the draw line first');
+  gone = true;
+  await tick();
+  assert.equal(v.host.querySelector('[data-done="gone"]').textContent, m.SANTA_GONE_TEXT);
+  assert.equal(v.host.querySelector('[data-done="ok"]'), null, 'no green Drawn line under an Ended chip');
+});
+
 test('a network error keeps the last view quietly, and the next tick tries again', async () => {
   let down = false;
   const calls = box([() => (down ? Promise.reject(new TypeError('Failed to fetch')) : json(read(2)))]);

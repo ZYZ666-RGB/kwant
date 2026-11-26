@@ -1124,7 +1124,7 @@ const SantaActions: React.FC<{
               Copy invite
             </button>
           )}
-          {pageLink(host ? `Join as ${host}` : 'Join on your phone', false, true)}
+          {pageLink(host ? `Join as ${host}` : 'Join yourself', false, true)}
           {peopleBtn}
           {s.can_draw ? (
             <button type="button" onClick={() => onConfirm('draw')} className={`kw-btn-ghost ${HALF} col-span-1 sm:ml-auto`} data-action="draw">
@@ -1255,7 +1255,9 @@ export const SantaCard: React.FC<{ block: PocketBlock; ask: (t: string) => void 
       const r = await pocketApi.read(code);
       if (seq === actSeq.current) apply(r);
     } catch (e) {
-      if (e instanceof PocketApiError && e.status === 404) {
+      // Only the box's own "no pocket here" means gone. Other 404s (Pocket apps switched off in Settings, a proxy
+      // page) keep the last view quietly and keep reading, like a network error.
+      if (e instanceof PocketApiError && e.status === 404 && e.code === 'not_found') {
         goneRef.current = true;
         setGone(true);
       }
@@ -1340,13 +1342,13 @@ export const SantaCard: React.FC<{ block: PocketBlock; ask: (t: string) => void 
       <div className="relative flex flex-col gap-4">
         {!gone && <SantaBody block={block} s={s} ask={ask} closed={closed} />}
         {showsPeople && <PeoplePanel block={block} s={s} onRead={apply} onReset={onReset} />}
-        {gone && !done ? (
+        {gone ? (
           <p role="status" className="flex items-start gap-2 text-[15px] text-zinc-300 sm:text-[13px]" data-done="gone">
             <Info size={15} className={ICON} aria-hidden="true" />
             {SANTA_GONE_TEXT}
           </p>
         ) : null}
-        {done ? (
+        {done && !gone ? (
           <p role="status" className={`flex items-start gap-2 text-[15px] sm:text-[13px] ${done.kind === 'ok' ? 'text-ok' : 'text-bad'}`} data-done={done.kind}>
             {done.kind === 'ok' ? <Check size={15} className={ICON} aria-hidden="true" /> : <AlertTriangle size={15} className={ICON} aria-hidden="true" />}
             {done.text}
