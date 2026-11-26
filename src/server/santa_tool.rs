@@ -43,10 +43,10 @@ pub fn handles(name: &str) -> bool {
 pub fn tool() -> Value {
     json!({
         "name": TOOL,
-        "description": "Make a Secret Santa (also called a gift exchange, Kris Kringle, Wichteln or Secret Elf) for a family, office or group of friends. \
-            People join on their phones with a name and a PIN, kwant draws the names so couples you name are kept apart, and each person sees only who \
-            they give to. Call it first with no spec to get the fields and rules, then with the whole spec: it checks it, opens the Secret Santa and \
-            shows its card in the person's chat with the invite link. Never draw names yourself or post who gets whom.",
+        "description": "Make a Secret Santa (also called a gift exchange, Kris Kringle or Wichteln) for a family, office or group of friends. \
+            People join on their phones with a first name and a PIN, kwant draws the names and keeps apart any couples the person names, and each \
+            person sees only who they give to. Call it first with no spec to get the fields and rules, then with the whole spec: it checks it, opens \
+            the Secret Santa and shows its card, with the invite, in the person's chat. Never draw names yourself or post who gets whom.",
         "inputSchema": {"type": "object", "properties": {
             "spec": {"type": "object", "description": "The Secret Santa (title, gift_on, reveal_at, people, keep_apart, budget…), written from the rules santa_create gives you"}
         }},
@@ -57,24 +57,28 @@ pub fn tool() -> Value {
 /// bot) and a sample.
 pub const RULES: &str = "Secret Santa: the fields and rules.
 
-kwant runs the whole Secret Santa: people join on their phones with a first name and a 4-digit PIN, kwant draws the names in one loop that keeps \
-the pairs you name apart, and from then on each person sees only their own match. The person who asked (the host) sees who joined and ticks, \
-never a match. You never draw names, guess or post who gets whom, and you can't see a match either.
+kwant runs the whole Secret Santa: people join on their phones with a first name and a 4-digit PIN, kwant draws the names (nobody gets \
+themselves, and the pairs in keep_apart never get each other), and from then on each person sees only their own match. The person who asked \
+(the host) sees who has joined, who has looked and who has a gift ready, never a match. If the host takes part, they join with the invite like \
+everyone else. You never draw names, guess or post who gets whom, and you can't see a match either.
 
 Fields (one JSON object):
 - title (required): what people see, like \"Office Secret Santa\".
 - gift_on (required): the day gifts are given, YYYY-MM-DD.
-- reveal (true or false, default true): whether everyone sees the whole loop at reveal_at.
+- reveal (true or false, default true): whether everyone sees who gave to whom at reveal_at. Set it to false only if the person wants the \
+matches kept secret for good.
 - reveal_at (required while reveal is true): RFC 3339 with the person's offset. Use 7 PM on the gift day in the person's time zone unless they \
 said another time, like 2026-12-18T19:00:00+00:00. It can't be in the past or more than a day before the gift day.
 - people (optional): the first names you expect, like [\"Anna\", \"Ben\"]. The card shows who hasn't joined yet.
-- expected (optional, 3 to 60): how many people take part. Names are drawn as soon as that many have joined; without it, from the length of people.
-- draw_at (optional): RFC 3339; names are drawn then even if someone is missing. Before the gift day.
+- expected (optional, 3 to 60): how many people take part, counting the person who asked if they're in it. Names are drawn as soon as that \
+many have joined. Without it, the number of names in people is used; with neither, names are drawn only when the host presses Draw now on the card.
+- draw_at (optional): RFC 3339; names are drawn then, even if someone hasn't joined. It must be before the gift day.
 - keep_apart (optional): pairs who must not draw each other, like [[\"Anna\", \"Ben\"]] for a couple.
 - budget (optional, at most 24 characters): the spending limit as the person said it, like \"£20\".
 - host_name (optional): the host's first name.
 
-Ask the person only for what you can't fill: a title you can make up, and the reveal comes from the gift day. Dates can't change once it's open.
+Fill what you can: make up the title and set reveal_at from the gift day. If the person didn't give the gift day, ask for it in one short \
+question and ask nothing else. Dates can't change once it's open, so say them back in your reply.
 
 Sample (its names and dates are samples; write the person's own):
 {\"title\": \"Team Secret Santa\", \"gift_on\": \"2026-12-18\", \"reveal\": true, \"reveal_at\": \"2026-12-18T19:00:00+00:00\", \
@@ -152,17 +156,23 @@ pub async fn call(state: &AppState, scope: &SelfScope, args: &Value) -> ToolResu
 fn made_text(code: &str, c: &Card, join: Option<&Value>) -> String {
     let link = join.and_then(|j| j["anywhere_url"].as_str().or(j["wifi_url"].as_str()));
     let link_line = match (link, join.map(|j| j["mode"].as_str() == Some("wifi"))) {
-        (Some(u), Some(true)) => format!("Invite link: {u} (it works on this Wi-Fi only; the card shows how to let people join from anywhere)."),
-        (Some(u), _) => format!("Invite link: {u}"),
-        (None, _) => "No invite link works yet: the card shows the person how to set one up.".into(),
+        (Some(u), Some(true)) => format!(
+            "Invite link: {u}\nIt works only on the same Wi-Fi as this computer; the card shows how to let people join from anywhere. \
+             Tell the person to send it to everyone taking part."
+        ),
+        (Some(u), _) => format!("Invite link: {u}\nTell the person to send it to everyone taking part."),
+        (None, _) => "No invite link works yet: the card shows the person how to set one up. Don't write a link yourself. \
+                      Once the card has one, the person sends it to everyone taking part."
+            .into(),
     };
     let rule = c.santa["draw_rule"].as_str().unwrap_or("when the person presses Draw now on the card");
     format!(
         "{CARD_TEXT_HEAD}{code}] \"{name}\" is open.\n\
-         The person's chat shows its card: who has joined, the invite link and the draw.\n\
+         The person's chat already shows its card (who has joined, the invite and the draw), so keep your reply to two or three lines and \
+         don't repeat what's on it.\n\
          {link_line}\n\
-         Names are drawn {rule}. Tell the person to send the invite to everyone taking part.\n\
-         Never draw names yourself, guess or post who gets whom: each person sees only their own match, and nobody else can, not you and not the host.",
+         Names are drawn {rule}.\n\
+         Never draw names yourself, guess or post who gets whom: until the reveal, each person sees only their own match, and you never see any.",
         name = c.name
     )
 }
