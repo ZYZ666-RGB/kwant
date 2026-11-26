@@ -77,19 +77,14 @@ impl Policy {
     /// The size cap for a page at `url`: a [`Policy::big_hosts`] cap when its host is that host or
     /// one of its subdomains, else `max_bytes`.
     pub fn cap_for(&self, url: &url::Url) -> usize {
-        let Some(host) = url.host_str() else { return self.max_bytes };
-        let host = host.trim_end_matches('.').to_ascii_lowercase();
-        self.big_hosts
-            .iter()
-            .find(|(h, _)| {
-                let h = h.trim_end_matches('.').to_ascii_lowercase();
-                !h.is_empty() && (host == h || host.strip_suffix(&h).is_some_and(|sub| sub.ends_with('.')))
-            })
-            .map_or(self.max_bytes, |(_, cap)| *cap)
+        // RED PROOF: main's behaviour, one cap for every host
+        let _ = url;
+        self.max_bytes
     }
 }
 
 /// "over 2 MB": the cap that applied, for [`Fail::TooBig`]'s detail.
+#[allow(dead_code)] // RED PROOF: unused until the fix
 fn over(cap: usize) -> String {
     if cap >= 1024 * 1024 {
         format!("over {} MB", cap / (1024 * 1024))
@@ -122,7 +117,7 @@ impl Fail {
             Fail::NotHttps => "the source isn't https",
             Fail::PrivateAddress => "the source is on a private or local address",
             Fail::FetchFailed => "the source page didn't load",
-            Fail::TooBig => "the source page is too big",
+            Fail::TooBig => "the source page is bigger than 2 MB",
             Fail::NotAPage => "the source isn't a web page",
             Fail::QuoteMissing => "the quote isn't on that page",
             Fail::AnswerNotInQuote => "the quote doesn't contain the answer",
@@ -454,9 +449,8 @@ async fn fetch_inner(url: &str, policy: &Policy) -> Result<String, FetchErr> {
         if !status.is_success() {
             return Err((Fail::FetchFailed, Some(format!("it answered {}", status.as_u16()))));
         }
-        let cap = policy.cap_for(&at);
-        if resp.content_length().is_some_and(|n| n > cap as u64) {
-            return Err((Fail::TooBig, Some(over(cap))));
+        if resp.content_length().is_some_and(|n| n as usize > policy.max_bytes) {
+            return Err((Fail::TooBig, None));
         }
         let ctype = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|c| c.to_str().ok()).unwrap_or("").to_ascii_lowercase();
         let html = ctype.contains("html");
@@ -466,8 +460,8 @@ async fn fetch_inner(url: &str, policy: &Policy) -> Result<String, FetchErr> {
         let mut body = Vec::new();
         while let Some(chunk) = resp.chunk().await.map_err(|_| (Fail::FetchFailed, Some("the page stopped loading".into())))? {
             body.extend_from_slice(&chunk);
-            if body.len() > cap {
-                return Err((Fail::TooBig, Some(over(cap))));
+            if body.len() > policy.max_bytes {
+                return Err((Fail::TooBig, None));
             }
         }
         let text = String::from_utf8_lossy(&body);
