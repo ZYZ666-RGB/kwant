@@ -646,11 +646,13 @@ mod tests {
         Policy { big_hosts: vec![("localhost".into(), WIKIPEDIA_MAX_BYTES)], ..local() }
     }
 
+    // Checked when the tests compile: the Wikipedia cap is the bigger one.
+    const _: () = assert!(WIKIPEDIA_MAX_BYTES > MAX_BYTES);
+
     #[test]
     fn wikipedia_hosts_get_the_bigger_cap_and_look_alikes_do_not() {
         let p = Policy::default();
         let cap = |u: &str| p.cap_for(&url::Url::parse(u).unwrap());
-        assert!(WIKIPEDIA_MAX_BYTES > MAX_BYTES);
         for u in [
             "https://en.wikipedia.org/wiki/Joe_Biden",
             "https://de.wikipedia.org/wiki/Vereinigte_Staaten",
