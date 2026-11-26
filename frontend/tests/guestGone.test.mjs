@@ -66,7 +66,8 @@ test('a gone boot draws the ended screen, kit-neutral, and asks nothing', async 
   const main = app.querySelector('main');
   assert.equal(main?.getAttribute('data-screen'), 'gone');
   assert.equal(app.querySelector('h2')?.textContent, 'This page has ended');
-  assert.equal(app.querySelector('p.lead')?.textContent, 'Everything in it was deleted. Thanks for taking part!');
+  assert.equal(app.querySelector('p.lead')?.textContent, 'Everything in it was deleted. Thanks for taking\u00a0part!', 'a no-break space before "part!"');
+  assert.equal(app.querySelector('.body.mid p.small')?.textContent, 'Expected something here? Check the link with whoever sent it.');
   assert.equal(w.document.title, 'This page has ended', 'not "Join the quiz"');
   assert.ok(app.querySelector('.body.mid .qmwrap [role="img"]'), 'the creature, like the other message screens');
   const made = app.querySelector('footer.madewith a');
